@@ -1,0 +1,41 @@
+name: Generate Logistics Report (Testing)
+
+# Memberi tahu GitHub bahwa workflow ini dipicu secara manual atau via webhook API
+on:
+  workflow_dispatch:
+    inputs:
+      tms_id:
+        description: 'Google Drive File ID for TMS'
+        required: false
+        default: 'dummy_tms_id_123'
+      zsdr_id:
+        description: 'Google Drive File ID for ZSDR'
+        required: false
+        default: 'dummy_zsdr_id_456'
+      sheet_url:
+        description: 'Target Google Sheet URL'
+        required: false
+        default: 'https://docs.google.com/spreadsheets/dummy'
+
+jobs:
+  run-python-script:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. Mengambil file dari repository (process_report.py)
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        
+      # 2. Menyiapkan mesin Python
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      # 3. Menjalankan file Python dengan menyuntikkan parameter input
+      - name: Run Dummy Pipeline
+        env:
+          TMS_FILE_ID: ${{ github.event.inputs.tms_id }}
+          ZSDR_FILE_ID: ${{ github.event.inputs.zsdr_id }}
+          TARGET_SHEET_URL: ${{ github.event.inputs.sheet_url }}
+        run: python process_report.py
