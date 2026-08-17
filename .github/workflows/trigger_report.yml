@@ -1,41 +1,29 @@
-name: Generate Logistics Report (Production)
+name: Logistics Pipeline Automation
 
 on:
-  workflow_dispatch:
-    inputs:
-      tms_id:
-        description: 'Google Drive File ID for TMS'
-        required: true
-      zsdr_id:
-        description: 'Google Drive File ID for ZSDR'
-        required: true
-      sheet_id:
-        description: 'Target Google Sheet ID'
-        required: true
+  workflow_dispatch:    # Mengizinkan trigger manual & via API (Apps Script)
 
 jobs:
-  run-python-script:
+  run-pipeline:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          
-      # --- BAGIAN INI YANG SEBELUMNYA TIDAK ADA ---
+
       - name: Install Dependencies
         run: |
-          pip install pandas google-api-python-client google-auth-httplib2 google-auth-oauthlib openpyxl gspread
-      # -------------------------------------------
-          
-      - name: Run Pipeline Script
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Logistics Python Script
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
-          TMS_FILE_ID: ${{ github.event.inputs.tms_id }}
-          ZSDR_FILE_ID: ${{ github.event.inputs.zsdr_id }}
-          TARGET_SHEET_ID: ${{ github.event.inputs.sheet_id }}
-        run: python process_report.py
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          STAGING_FOLDER_ID: ${{ secrets.STAGING_FOLDER_ID }}
+        run: python main.py
