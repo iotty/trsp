@@ -9,10 +9,9 @@ on:
       zsdr_id:
         description: 'Google Drive File ID for ZSDR'
         required: true
-      sheet_url:
-        description: 'Target Google Sheet URL'
-        required: false
-        default: 'https://docs.google.com/spreadsheets/dummy'
+      sheet_id:
+        description: 'Target Google Sheet ID'
+        required: true
 
 jobs:
   run-python-script:
@@ -38,5 +37,5 @@ jobs:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           TMS_FILE_ID: ${{ github.event.inputs.tms_id }}
           ZSDR_FILE_ID: ${{ github.event.inputs.zsdr_id }}
-          TARGET_SHEET_URL: ${{ github.event.inputs.sheet_url }}
+          TARGET_SHEET_ID: ${{ github.event.inputs.sheet_id }}
         run: python process_report.py
