@@ -77,11 +77,9 @@ def load_master_data(gc, sheet_id):
 # 3A. FUNGSI FORMAT WAKTU KE WIB (UTC+7)
 # ==========================================
 def format_time_to_wib(iso_string):
-    """Mengonversi waktu bawaan Google Drive (UTC) menjadi format WIB (UTC+7) yang rapi."""
     if not iso_string: 
         return "-"
     try:
-        # Format bawaan Drive API: 2026-08-17T08:14:21.123Z
         dt = datetime.strptime(iso_string[:19], "%Y-%m-%dT%H:%M:%S")
         dt_wib = dt + timedelta(hours=7) 
         return dt_wib.strftime("%Y-%m-%d %H:%M:%S")
@@ -95,7 +93,6 @@ def download_latest_file(drive_svc, folder_id, prefix, skip_rows=0):
     logger.info(f"Mencari file berawalan '{prefix}' di Drive Staging...")
     try:
         query = f"'{folder_id}' in parents and name contains '{prefix}' and trashed = false"
-        # Meminta id, name, dan modifiedTime sekaligus
         results = drive_svc.files().list(
             q=query, orderBy="createdTime desc", fields="files(id, name, modifiedTime)", pageSize=1
         ).execute()
@@ -120,7 +117,6 @@ def download_latest_file(drive_svc, folder_id, prefix, skip_rows=0):
         df = pd.read_excel(bio, engine='openpyxl', skiprows=skip_rows)
         logger.info(f"Proses baca Excel '{prefix}' sukses: {len(df)} baris diekstrak.")
         
-        # Mengembalikan DataFrame dan waktu update terakhir
         return df, modified_time
         
     except Exception as e:
@@ -425,51 +421,46 @@ def main_logistics_pipeline():
         gc, drive_svc = authenticate_services()
         dict_masters = load_master_data(gc, target_sheet_id)
         
-        # Unduh data sekaligus mengambil metadata waktu file
         df_tms_raw, tms_mod_time = download_latest_file(drive_svc, staging_folder_id, 'TMS_', skip_rows=1)
         df_zsdr_raw, zsdr_mod_time = download_latest_file(drive_svc, staging_folder_id, 'ZSDR_', skip_rows=0)
         
-        # Konversi waktu ke WIB
         tms_wib = format_time_to_wib(tms_mod_time)
         zsdr_wib = format_time_to_wib(zsdr_mod_time)
         
-        # Tulis Log ke Spreadsheet
         update_log_file(gc, target_sheet_id, tms_wib, zsdr_wib)
         
-        # Eksekusi Transformasi Data Utama
         df_tms_clean = preprocess_tms(df_tms_raw)
         df_zsdr_sku = process_data(df_zsdr_raw, df_tms_clean, dict_masters)
         df_zsdr_shipment = create_shipment_report(df_zsdr_sku)
         
-        # Eksekusi Sub-Filter (Shipped & Backlog)
         df_shipped_dom = create_shipped_domestic(df_zsdr_sku)
         df_shipped_exp = create_shipped_export(df_zsdr_sku)
         df_backlog_dom = create_backlog_domestic(df_zsdr_sku)
         df_backlog_exp = create_backlog_export(df_zsdr_sku)
         
-        # Workflow 0: TMS Raw Clean
         logger.info(">>> Menjalankan Workflow 0: Persiapan Data TMS")
         export_to_sheets(gc, target_sheet_id, df_tms_clean, "TMS_Cur_Month")
 
-        # Workflow 1: ZSDR Master
         logger.info(">>> Menjalankan Workflow 1: Current Month ZSDR SKU-Level")
         export_to_sheets(gc, target_sheet_id, df_zsdr_sku, "ZSDR_Cur_Month_SKU")
         
-        # Workflow 2: ZSDR Agregasi
         logger.info(">>> Menjalankan Workflow 2: ZSDR Current Month Report")
         export_to_sheets(gc, target_sheet_id, df_zsdr_shipment, "ZSDR_Cur_Month")
 
         # -----------------------------------------------------------------
         # DAFTAR KOLOM STATIS
         # -----------------------------------------------------------------
+        
+        # PERBAIKAN: Menambahkan kolom 'TRAIN/TRUCK' di akhir array (Total 18 Kolom)
         static_cols_shipped = [
             'Master Contract Number', 'Delivery', 'SD Document', 'Contract Number', 
             'DO Means of Pack', 'SO Means of Pack', 'Material', 'Material Group', 
             'Quantity', 'Quantity in MT', 'Ship to Name', 'Schedule Date', 
             'Act. Gds Mvmnt Date', 'Sales District', 'Sold to Name', 
-            'Sales PIC Name', 'Unit (MT)'
+            'Sales PIC Name', 'Unit (MT)', 'TRAIN/TRUCK'
         ]
         
+        # Laporan Backlogged (21 Kolom)
         static_cols_backlog = [
             'Master Contract Number', 'Delivery', 'SD Document', 'Contract Number', 
             'DO Means of Pack', 'SO Means of Pack', 'Material', 'Material Group', 
@@ -478,22 +469,22 @@ def main_logistics_pipeline():
             'Sales PIC Name', 'Unit (MT)', 'Vendor', 'SM', 'Last Status', 'Sales LGS'
         ]
 
-        # Workflow 3: Shipped Domestics
+        # Workflow 3: Shipped Domestics (18 Kolom -> A hingga R)
         logger.info(">>> Menjalankan Workflow 3: Shipped Report (Domestics)")
         export_to_sheets(gc, target_sheet_id, df_shipped_dom, "Shipped_Report", 
-                         header_row=10, start_col='A', clear_range='A11:R', static_headers=static_cols_shipped)
+                         header_row=10, start_col='A', clear_range='A11:S', static_headers=static_cols_shipped)
         
-        # Workflow 4: Shipped Export
+        # PERBAIKAN: Workflow 4 (Shipped Export) Digeser ke kolom T (agar S jadi spasi kosong)
         logger.info(">>> Menjalankan Workflow 4: Shipped Report (Export)")
         export_to_sheets(gc, target_sheet_id, df_shipped_exp, "Shipped_Report", 
-                         header_row=10, start_col='S', clear_range='S11:ZZ', static_headers=static_cols_shipped)
+                         header_row=10, start_col='T', clear_range='T11:ZZ', static_headers=static_cols_shipped)
         
-        # Workflow 5: Backlog Domestics
+        # Workflow 5: Backlog Domestics (21 Kolom -> A hingga V)
         logger.info(">>> Menjalankan Workflow 5: Backlog Report (Domestics)")
         export_to_sheets(gc, target_sheet_id, df_backlog_dom, "Backlog_Report", 
                          header_row=11, start_col='A', clear_range='A12:V', static_headers=static_cols_backlog)
 
-        # Workflow 6: Backlog Export
+        # Workflow 6: Backlog Export (Kolom W ke ZZ)
         logger.info(">>> Menjalankan Workflow 6: Backlog Report (Export)")
         export_to_sheets(gc, target_sheet_id, df_backlog_exp, "Backlog_Report", 
                          header_row=11, start_col='W', clear_range='W12:ZZ', static_headers=static_cols_backlog)
