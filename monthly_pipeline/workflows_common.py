@@ -217,7 +217,19 @@ def process_data(df_zsdr, df_tms, df_masters):
     df_zsdr['Is SA2,SA4,SB'] = np.where(df_zsdr['SD Document'].astype(str).str.startswith(('SA2', 'SA4', 'SB')), 'Yes', 'No')
 
     mat_ok = df_zsdr['Material'].notna() & (df_zsdr['Material'] != '')
-    df_zsdr['Are blocked'] = np.where(~mat_ok, '', np.where(df_zsdr['Block'].notna(), 'Blocked', 'Not Blocked'))
+
+    # BUG FIX: `.notna()` alone only catches an actual NaN — it does NOT
+    # catch an empty string ''. A freshly-uploaded file reads genuinely
+    # blank cells as NaN (pandas/openpyxl), so this worked fine there.
+    # But refresh_helper_columns.py reads the ZSDR002 data back out of
+    # the Sheet via read_tab_as_df() (gspread get_all_records()), where
+    # a blank cell comes back as '' rather than NaN — so `.notna()`
+    # treated every blank 'Block' cell as "filled," collapsing this
+    # column to 'Blocked' for every row after any refresh. Checking for
+    # both NaN and a blank/whitespace-only string is what actually means
+    # "does this cell have something in it."
+    block_filled = df_zsdr['Block'].notna() & (df_zsdr['Block'].astype(str).str.strip() != '')
+    df_zsdr['Are blocked'] = np.where(~mat_ok, '', np.where(block_filled, 'Blocked', 'Not Blocked'))
 
     do_pack = df_zsdr['DO Means of Pack'].fillna('').astype(str).str.lower()
     mat_group = df_zsdr['Material Group'].fillna('').astype(str).str.lower()
