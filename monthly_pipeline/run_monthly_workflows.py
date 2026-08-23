@@ -260,13 +260,13 @@ def process_data(df_zsdr, df_tms, df_masters):
         ['Loading', 'Register', 'Accept', 'Tender'], default=''
     )
 
-    # Put every computed helper column (Type of Truck, SM, Sales LGS, the
-    # merged TMS dates, Is SA2/SA4/SB, Are blocked, Is Scrap, Vendor,
-    # Truck Vendor Type, TRAIN/TRUCK, Last Status — in the order they
-    # were computed above) to the LEFT of the original ZSDR002 columns,
-    # which keep their exact original order, untouched.
+    # Original ZSDR002 columns first, in their exact original order,
+    # untouched — every computed helper column (Type of Truck, SM, Sales
+    # LGS, the merged TMS dates, Is SA2/SA4/SB, Are blocked, Is Scrap,
+    # Vendor, Truck Vendor Type, TRAIN/TRUCK, Last Status, in the order
+    # they were computed above) goes to the RIGHT of that block.
     helper_cols = [c for c in df_zsdr.columns if c not in original_cols]
-    df_zsdr = df_zsdr[helper_cols + original_cols]
+    df_zsdr = df_zsdr[original_cols + helper_cols]
 
     return df_zsdr
 
