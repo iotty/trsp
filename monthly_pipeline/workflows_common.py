@@ -251,7 +251,23 @@ def create_shipment_report(df_zsdr):
     if 'Quantity in MT' in df_report.columns:
         df_report['Quantity in MT'] = pd.to_numeric(df_report['Quantity in MT'], errors='coerce').fillna(0)
 
-    group_cols = ['Shipment_ID'] + [c for c in cols_ref if c in df_report.columns]
+    # Group ONLY by Shipment_ID — the actual shipment identifier.
+    #
+    # BUG FIX: the original script's group_cols was
+    # ['Shipment_ID'] + cols_ref (i.e. Shipment_ID PLUS the raw SM,
+    # Delivery, SD Document, and Contract Number columns all together).
+    # Since Shipment_ID is itself backfilled FROM those same four
+    # columns, grouping by all of them at once meant two rows only
+    # collapsed into one shipment row if SM, Delivery, SD Document, AND
+    # Contract Number all matched exactly — not just the shipment
+    # identifier. A shipment (one SM) covering multiple deliveries
+    # never actually collapsed, because Delivery differed row to row,
+    # producing multiple output rows that all show the same SM instead
+    # of one rolled-up row. Grouping by Shipment_ID alone, and letting
+    # SM/Delivery/SD Document/Contract Number aggregate with 'first'
+    # like any other non-summed column, is what the "one row per
+    # shipment" rollup was actually meant to do.
+    group_cols = ['Shipment_ID']
 
     agg_dict = {}
     for col in df_report.columns:
