@@ -23,6 +23,12 @@ GUARANTEE: the original ZSDR002 columns are never touched. This script:
   4) Writes the result back (original columns unchanged + freshly
      computed helper columns), and regenerates
      "<MON>_ZSDR002_ShipLevel" from the refreshed SKU-level data.
+  5) FINAL STEP: upserts every refreshed month's ShipLevel rows into a
+     single "ZSDR002_Consolidate" tab, keyed by (Month, Shipment_ID).
+     Only the month(s) refreshed this run are touched there — matching
+     shipments are updated, new ones inserted, and shipments that no
+     longer appear in that month's ShipLevel tab are dropped from the
+     consolidated tab. Every other month's rows are left untouched.
 
 If a month's "<Mon>_TMS" or "<Mon>_ZSDR002" tab doesn't exist (or is
 empty), that month is skipped with a warning rather than failing the
@@ -44,7 +50,8 @@ import sys
 from workflows_common import (
     logger, MONTH_ABBR, HELPER_COLUMN_NAMES, get_env, authenticate_services,
     load_master_data, preprocess_tms, process_data, create_shipment_report,
-    get_or_create_worksheet, export_dataframe, read_tab_as_df
+    get_or_create_worksheet, export_dataframe, read_tab_as_df,
+    consolidate_shipment_reports
 )
 
 
@@ -118,6 +125,15 @@ def main():
         export_dataframe(ws_ship, df_ship_refreshed, ship_tab_name)
 
         refreshed.append(month_abbr)
+
+    # Final step: upsert the freshly refreshed month(s)' ShipLevel data
+    # into the single 'ZSDR002_Consolidate' tab. Only the month(s) that
+    # were actually refreshed this run are touched — every other
+    # month's rows already in the consolidated tab are left as-is.
+    if refreshed:
+        consolidate_shipment_reports(monthly_sheet, refreshed)
+    else:
+        logger.warning("No months were successfully refreshed — skipping shipment-level consolidation step.")
 
     logger.info("================ Refresh complete ================")
     logger.info(f"Refreshed: {', '.join(refreshed) if refreshed else '(none)'}")
