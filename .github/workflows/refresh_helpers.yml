@@ -1,0 +1,53 @@
+name: Refresh Helper Columns
+
+# -----------------------------------------------------------------------
+# Re-derives helper columns (Type of Truck, SM, Sales LGS, TMS dates,
+# Is SA2/SA4/SB, Are blocked, Is Scrap, Vendor, Truck Vendor Type,
+# TRAIN/TRUCK, Last Status) for month(s) that already have data, using
+# the CURRENT master data on the production Sheet — without requiring
+# any new file upload. Triggered by the "Refresh" button in the Apps
+# Script interface.
+#
+# The original ZSDR002 source columns are never touched — only the
+# helper columns and the derived <MON>_ZSDR002_ShipLevel tab are
+# recomputed and rewritten. See refresh_helper_columns.py for the exact
+# guarantee.
+#
+# This is a SEPARATE workflow from both the production `pipeline.yml`
+# and the upload-triggered `file_abadi.yml` — it runs independently and
+# needs no staging folder access at all (no Drive file download here).
+# -----------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Optional: a single month key (e.g. Aug) to refresh just that month. Leave blank to refresh every month that currently has data.'
+        required: false
+        type: string
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r monthly_pipeline/requirements.txt
+
+      - name: Refresh helper columns
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          MONTHLY_TARGET_SHEET_ID: ${{ secrets.MONTHLY_TARGET_SHEET_ID }}
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          REFRESH_MONTH: ${{ github.event.inputs.month }}
+        run: python monthly_pipeline/refresh_helper_columns.py
