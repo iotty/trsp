@@ -23,12 +23,16 @@ GUARANTEE: the original ZSDR002 columns are never touched. This script:
   4) Writes the result back (original columns unchanged + freshly
      computed helper columns), and regenerates
      "<MON>_ZSDR002_ShipLevel" from the refreshed SKU-level data.
-  5) FINAL STEP: upserts every refreshed month's ShipLevel rows into a
-     single "ZSDR002_Consolidate" tab, keyed by (Month, Shipment_ID).
-     Only the month(s) refreshed this run are touched there — matching
-     shipments are updated, new ones inserted, and shipments that no
-     longer appear in that month's ShipLevel tab are dropped from the
-     consolidated tab. Every other month's rows are left untouched.
+  5) Upserts every refreshed month's ShipLevel rows into a single
+     "ZSDR002_Consolidate" tab (on the monthly Sheet), keyed by
+     (Month, Shipment_ID). Only the month(s) refreshed this run are
+     touched there — matching shipments are updated, new ones inserted,
+     and shipments that no longer appear in that month's ShipLevel tab
+     are dropped from the consolidated tab. Every other month's rows
+     are left untouched.
+  6) FINAL STEP: mirrors that now-current consolidated data into a
+     "ZSDR_Abadi" tab on the PRODUCTION Sheet (full replace copy, since
+     step 5 already produced the correct complete state).
 
 If a month's "<Mon>_TMS" or "<Mon>_ZSDR002" tab doesn't exist (or is
 empty), that month is skipped with a warning rather than failing the
@@ -51,7 +55,7 @@ from workflows_common import (
     logger, MONTH_ABBR, HELPER_COLUMN_NAMES, get_env, authenticate_services,
     load_master_data, preprocess_tms, process_data, create_shipment_report,
     get_or_create_worksheet, export_dataframe, read_tab_as_df,
-    consolidate_shipment_reports
+    consolidate_shipment_reports, mirror_consolidate_to_production
 )
 
 
@@ -126,14 +130,18 @@ def main():
 
         refreshed.append(month_abbr)
 
-    # Final step: upsert the freshly refreshed month(s)' ShipLevel data
-    # into the single 'ZSDR002_Consolidate' tab. Only the month(s) that
-    # were actually refreshed this run are touched — every other
-    # month's rows already in the consolidated tab are left as-is.
+    # Final steps:
+    #   1) Upsert the freshly refreshed month(s)' ShipLevel data into the
+    #      single 'ZSDR002_Consolidate' tab (monthly Sheet). Only the
+    #      month(s) actually refreshed this run are touched — every
+    #      other month's rows already there are left as-is.
+    #   2) Mirror that now-current consolidated data into the 'ZSDR_Abadi'
+    #      tab on the PRODUCTION Sheet, so it's available there too.
     if refreshed:
-        consolidate_shipment_reports(monthly_sheet, refreshed)
+        df_consolidated = consolidate_shipment_reports(monthly_sheet, refreshed)
+        mirror_consolidate_to_production(gc, production_sheet_id, df_consolidated)
     else:
-        logger.warning("No months were successfully refreshed — skipping shipment-level consolidation step.")
+        logger.warning("No months were successfully refreshed — skipping shipment-level consolidation and production mirror steps.")
 
     logger.info("================ Refresh complete ================")
     logger.info(f"Refreshed: {', '.join(refreshed) if refreshed else '(none)'}")
