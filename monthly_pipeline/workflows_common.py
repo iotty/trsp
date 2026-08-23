@@ -505,19 +505,51 @@ def consolidate_shipment_reports(sheet, months_to_process):
 
 # ==========================================
 # Mirrors the (already fully upserted) consolidated DataFrame into the
-# PRODUCTION Sheet's 'ZSDR_Abadi' tab.
+# PRODUCTION Sheet's 'ZSDR_Abadi' tab — filtered down to only the rows
+# that pass all three of these:
+#   1) 'Is SA2,SA4,SB' == 'Yes'
+#   2) 'Are blocked'   == 'Not Blocked'
+#   3) 'Is Scrap'      == 'NOT SCRAP'
 #
-# This is a straight full-replace copy, not a second upsert pass — by
-# the time this runs, `df_consolidated` returned by
+# NOTE: 'ZSDR002_Consolidate' on the monthly Sheet always keeps the FULL,
+# unfiltered set — this filter only applies to what gets copied into
+# production's 'ZSDR_Abadi'. That's deliberate: the monthly Sheet stays
+# the complete record, while production only wants the subset that's
+# actually SA2/SA4/SB, not blocked, and not scrap.
+#
+# This is otherwise a straight full-replace copy, not a second upsert
+# pass — by the time this runs, `df_consolidated` returned by
 # consolidate_shipment_reports() is already the complete, correct state
 # of every month (the upsert already happened against the monthly
 # Sheet's 'ZSDR002_Consolidate' tab). Re-deriving another upsert here
 # against whatever 'ZSDR_Abadi' currently holds would be redundant and
 # just adds another place the two copies could drift apart — a plain
-# mirror keeps 'ZSDR_Abadi' byte-for-byte in sync with
+# (filtered) mirror keeps 'ZSDR_Abadi' in sync with
 # 'ZSDR002_Consolidate' every run.
 # ==========================================
 PRODUCTION_MIRROR_TAB_NAME = 'ZSDR_Abadi'
+
+PRODUCTION_MIRROR_FILTERS = {
+    'Is SA2,SA4,SB': 'Yes',
+    'Are blocked': 'Not Blocked',
+    'Is Scrap': 'NOT SCRAP',
+}
+
+
+def _apply_production_mirror_filter(df):
+    mask = pd.Series(True, index=df.index)
+    missing_cols = []
+    for col, wanted_value in PRODUCTION_MIRROR_FILTERS.items():
+        if col not in df.columns:
+            missing_cols.append(col)
+            continue
+        mask &= (df[col] == wanted_value)
+    if missing_cols:
+        logger.warning(
+            f"Production mirror filter: column(s) {missing_cols} not found in consolidated data — "
+            f"filter on those column(s) skipped (rows not excluded on that basis)."
+        )
+    return df[mask].reset_index(drop=True)
 
 
 def mirror_consolidate_to_production(gc, production_sheet_id, df_consolidated):
@@ -525,7 +557,14 @@ def mirror_consolidate_to_production(gc, production_sheet_id, df_consolidated):
         logger.warning("mirror_consolidate_to_production(): nothing to mirror — skipping.")
         return
 
-    logger.info(f"Mirroring '{CONSOLIDATE_TAB_NAME}' -> production Sheet tab '{PRODUCTION_MIRROR_TAB_NAME}'...")
+    total_rows = len(df_consolidated)
+    df_filtered = _apply_production_mirror_filter(df_consolidated) if total_rows else df_consolidated
+    logger.info(
+        f"Mirroring '{CONSOLIDATE_TAB_NAME}' -> production Sheet tab '{PRODUCTION_MIRROR_TAB_NAME}' "
+        f"(filtered: Is SA2,SA4,SB=Yes, Are blocked=Not Blocked, Is Scrap=NOT SCRAP — "
+        f"{len(df_filtered)} of {total_rows} row(s) pass)..."
+    )
+    df_consolidated = df_filtered
 
     production_sheet = gc.open_by_key(production_sheet_id)
     ws = get_or_create_worksheet(production_sheet, PRODUCTION_MIRROR_TAB_NAME)
