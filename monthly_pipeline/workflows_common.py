@@ -385,6 +385,77 @@ def export_dataframe(worksheet, df, tab_name):
     logger.info(f"'{tab_name}': wrote {len(df_export)} row(s), {len(headers)} column(s).")
 
 
+# ==========================================
+# Header-driven export — mirrors the original production main.py's
+# export_to_sheets() (the branch used for "ZSDR_Cur_Month" etc., where
+# static_headers isn't passed): reads whatever header row ALREADY
+# exists in the destination tab and writes ONLY the columns that match
+# that header, in that header's exact order. Any column in `df` not in
+# the header is silently dropped; any header column not in `df` is
+# written blank.
+#
+# This is the actual explanation for why the original production
+# 'ZSDR_Cur_Month' tab never shows 'Material': it's not that the
+# original code strips it out — it's that the tab's own header row
+# (set up once, by hand, by whoever built that sheet) simply never
+# included it. The header row IS the report's column selection, not
+# the code.
+#
+# If the destination tab has no header row yet, the export is skipped
+# with a warning — same as the original — so a human sets the header
+# row up once by hand (exactly the columns/order wanted) and every run
+# after that preserves it untouched.
+# ==========================================
+def export_dataframe_header_driven(worksheet, df, tab_name, header_row=1, start_col='A'):
+    existing_header = worksheet.row_values(header_row)
+    if not existing_header:
+        logger.warning(
+            f"'{tab_name}': header row {header_row} is empty — export skipped. "
+            f"Set up the header row by hand (exactly the columns/order you want), then re-run."
+        )
+        return
+
+    export_dict = {}
+    missing_from_df = []
+    for col in existing_header:
+        if col in df.columns:
+            export_dict[col] = df[col]
+        else:
+            export_dict[col] = ""
+            missing_from_df.append(col)
+    if missing_from_df:
+        logger.warning(f"'{tab_name}': header column(s) {missing_from_df} not found in the computed data — written blank.")
+
+    dropped_cols = [c for c in df.columns if c not in existing_header]
+    if dropped_cols:
+        logger.info(f"'{tab_name}': {len(dropped_cols)} computed column(s) not in the header row are not exported: {dropped_cols}")
+
+    df_final = pd.DataFrame(export_dict)
+
+    for col in df_final.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_final[col]):
+            formatted = df_final[col].dt.strftime('%Y-%m-%d %H:%M:%S').str.replace(' 00:00:00', '')
+            df_final[col] = formatted.where(df_final[col].notna(), '')
+            df_final[col] = df_final[col].apply(lambda v: f"'{v}" if v else v)
+        elif df_final[col].apply(lambda x: isinstance(x, time)).any():
+            df_final[col] = df_final[col].astype(str).replace('NaT', '')
+            df_final[col] = df_final[col].apply(lambda v: f"'{v}" if v and v != 'None' else '')
+
+    df_final = df_final.fillna("")
+    values_to_write = df_final.values.tolist()
+
+    data_start_row = header_row + 1
+    clear_str = f'{start_col}{data_start_row}:ZZ'
+    worksheet.batch_clear([clear_str])
+
+    if not values_to_write:
+        logger.warning(f"'{tab_name}': no data to write.")
+        return
+
+    worksheet.update(values=values_to_write, range_name=f'{start_col}{data_start_row}', value_input_option='USER_ENTERED')
+    logger.info(f"'{tab_name}': wrote {len(values_to_write)} row(s) across {len(existing_header)} header column(s) (header row preserved, not overwritten).")
+
+
 def read_tab_as_df(sheet, tab_name):
     """
     Reads an existing tab back into a DataFrame, or None if it doesn't
@@ -517,15 +588,19 @@ def consolidate_shipment_reports(sheet, months_to_process):
 # the complete record, while production only wants the subset that's
 # actually SA2/SA4/SB, not blocked, and not scrap.
 #
-# This is otherwise a straight full-replace copy, not a second upsert
-# pass — by the time this runs, `df_consolidated` returned by
-# consolidate_shipment_reports() is already the complete, correct state
-# of every month (the upsert already happened against the monthly
-# Sheet's 'ZSDR002_Consolidate' tab). Re-deriving another upsert here
-# against whatever 'ZSDR_Abadi' currently holds would be redundant and
-# just adds another place the two copies could drift apart — a plain
-# (filtered) mirror keeps 'ZSDR_Abadi' in sync with
-# 'ZSDR002_Consolidate' every run.
+# The write itself is HEADER-DRIVEN (export_dataframe_header_driven),
+# matching how the original production pipeline's 'ZSDR_Cur_Month'
+# works: 'ZSDR_Abadi' must already have a header row set up by hand
+# (exactly the columns/order wanted — e.g. without 'Material', if
+# that's not wanted there), and only columns matching that header get
+# written; everything else computed is silently dropped. Nothing here
+# ever overwrites that header row.
+#
+# This is otherwise a straight full-replace copy of the DATA rows, not
+# a second upsert pass — by the time this runs, `df_consolidated`
+# returned by consolidate_shipment_reports() is already the complete,
+# correct state of every month (the upsert already happened against
+# the monthly Sheet's 'ZSDR002_Consolidate' tab).
 # ==========================================
 PRODUCTION_MIRROR_TAB_NAME = 'ZSDR_Abadi'
 
@@ -568,6 +643,4 @@ def mirror_consolidate_to_production(gc, production_sheet_id, df_consolidated):
 
     production_sheet = gc.open_by_key(production_sheet_id)
     ws = get_or_create_worksheet(production_sheet, PRODUCTION_MIRROR_TAB_NAME)
-    export_dataframe(ws, df_consolidated, PRODUCTION_MIRROR_TAB_NAME)
-
-    logger.info(f"'{PRODUCTION_MIRROR_TAB_NAME}': mirrored {len(df_consolidated)} row(s) from '{CONSOLIDATE_TAB_NAME}'.")
+    export_dataframe_header_driven(ws, df_consolidated, PRODUCTION_MIRROR_TAB_NAME)
