@@ -6,12 +6,13 @@ name: File Abadi
 # dispatchDummyPipeline_) right after the Apps Script interface confirms
 # a new file has landed in the monthly staging folder.
 #
-# CURRENT SCOPE: this only verifies Drive access — it authenticates,
-# looks for the expected ZSDR002_<month>_ and TMS_<month>_ files in the
-# staging folder, and echoes PASS/FAIL for each. It does NOT download,
-# transform, or write anything to Sheets yet. Extend the "Check staged
-# files" step (or add steps after it) once real ingestion logic is
-# ready.
+# CURRENT SCOPE: this verifies Drive access — it authenticates, looks
+# for the expected ZSDR002_<month>_ and TMS_<month>_ files in the
+# staging folder, and writes a PASS/FAIL status directly into the
+# "Log_File" tab of the monthly Sheet (row = month, columns = ZSDR002 /
+# TMS). It does NOT download or transform the actual data yet — extend
+# the "Check staged files" step (or add steps after it) once real
+# ingestion logic is ready.
 #
 # This is a SEPARATE workflow file from the existing production
 # `pipeline.yml`, so it runs independently without touching the current
@@ -44,9 +45,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r monthly_pipeline/requirements.txt
 
-      - name: Check staged files are accessible
+      - name: Check staged files and log to Sheet
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           MONTHLY_STAGING_FOLDER_ID: ${{ secrets.MONTHLY_STAGING_FOLDER_ID }}
+          MONTHLY_TARGET_SHEET_ID: ${{ secrets.MONTHLY_TARGET_SHEET_ID }}
           UPLOAD_MONTH: ${{ github.event.inputs.month }}
         run: python monthly_pipeline/check_staged_files.py
