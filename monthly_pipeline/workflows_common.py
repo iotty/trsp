@@ -416,9 +416,16 @@ CONSOLIDATE_TAB_NAME = 'ZSDR002_Consolidate'
 
 
 def consolidate_shipment_reports(sheet, months_to_process):
+    """
+    Returns the final consolidated DataFrame (after the upsert) so the
+    caller can also mirror it elsewhere — see
+    mirror_consolidate_to_production() below — without re-reading every
+    ShipLevel tab a second time. Returns None if there was nothing to
+    consolidate.
+    """
     if not months_to_process:
         logger.warning("consolidate_shipment_reports() called with no months — skipping.")
-        return
+        return None
 
     logger.info(f"Consolidating ShipLevel data into '{CONSOLIDATE_TAB_NAME}' for: {', '.join(months_to_process)}...")
 
@@ -480,3 +487,36 @@ def consolidate_shipment_reports(sheet, months_to_process):
         f"'{CONSOLIDATE_TAB_NAME}': upserted {len(df_new)} row(s) for {', '.join(months_to_process)}; "
         f"preserved {len(df_kept)} row(s) from other months; {len(df_consolidated)} row(s) total."
     )
+
+    return df_consolidated
+
+
+# ==========================================
+# Mirrors the (already fully upserted) consolidated DataFrame into the
+# PRODUCTION Sheet's 'ZSDR_Abadi' tab.
+#
+# This is a straight full-replace copy, not a second upsert pass — by
+# the time this runs, `df_consolidated` returned by
+# consolidate_shipment_reports() is already the complete, correct state
+# of every month (the upsert already happened against the monthly
+# Sheet's 'ZSDR002_Consolidate' tab). Re-deriving another upsert here
+# against whatever 'ZSDR_Abadi' currently holds would be redundant and
+# just adds another place the two copies could drift apart — a plain
+# mirror keeps 'ZSDR_Abadi' byte-for-byte in sync with
+# 'ZSDR002_Consolidate' every run.
+# ==========================================
+PRODUCTION_MIRROR_TAB_NAME = 'ZSDR_Abadi'
+
+
+def mirror_consolidate_to_production(gc, production_sheet_id, df_consolidated):
+    if df_consolidated is None:
+        logger.warning("mirror_consolidate_to_production(): nothing to mirror — skipping.")
+        return
+
+    logger.info(f"Mirroring '{CONSOLIDATE_TAB_NAME}' -> production Sheet tab '{PRODUCTION_MIRROR_TAB_NAME}'...")
+
+    production_sheet = gc.open_by_key(production_sheet_id)
+    ws = get_or_create_worksheet(production_sheet, PRODUCTION_MIRROR_TAB_NAME)
+    export_dataframe(ws, df_consolidated, PRODUCTION_MIRROR_TAB_NAME)
+
+    logger.info(f"'{PRODUCTION_MIRROR_TAB_NAME}': mirrored {len(df_consolidated)} row(s) from '{CONSOLIDATE_TAB_NAME}'.")
