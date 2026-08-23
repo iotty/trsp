@@ -172,6 +172,15 @@ def preprocess_tms(df_tms):
 # ==========================================
 def process_data(df_zsdr, df_tms, df_masters):
     logger.info("Workflow 1: processing ZSDR002 SKU-level data...")
+
+    # Capture the original ZSDR002 column order BEFORE anything is added,
+    # so it can be restored unchanged at the end — every computed helper
+    # column (Type of Truck, SM, Sales LGS, the merged TMS dates, Is
+    # SA2/SA4/SB, Are blocked, Is Scrap, Vendor, Truck Vendor Type,
+    # TRAIN/TRUCK, Last Status) goes to the LEFT of this original block,
+    # never interleaved into it.
+    original_cols = list(df_zsdr.columns)
+
     d_cols = [c for c in ['Release Date', 'SO Create Date', 'DO Create Date', 'Schedule Date', 'Act. Gds Mvmnt Date'] if c in df_zsdr.columns]
     t_cols = [c for c in ['Release Time', 'SO Create Time', 'DO Create Time'] if c in df_zsdr.columns]
 
@@ -203,7 +212,10 @@ def process_data(df_zsdr, df_tms, df_masters):
     # Loading) so nothing has to be added piecemeal later. If a ZSDR002
     # column already has that exact name (unlikely, but possible), the
     # TMS version is written under "<col> (TMS)" instead of silently
-    # overwriting the ZSDR002 source column.
+    # overwriting the ZSDR002 source column. Track the actual column
+    # names used so they can be moved to the very front of the sheet at
+    # the end, ahead of even the original ZSDR002 columns.
+    tms_merged_cols = []
     for col in TMS_DATE_COLUMNS:
         if col not in tms_map.columns:
             continue
@@ -211,6 +223,7 @@ def process_data(df_zsdr, df_tms, df_masters):
         if target_col != col:
             logger.warning(f"ZSDR002 already has a '{col}' column — TMS version written to '{target_col}' instead of overwriting it.")
         df_zsdr[target_col] = df_zsdr['Delivery'].map(tms_map[col])
+        tms_merged_cols.append(target_col)
 
     df_zsdr['Is SA2,SA4,SB'] = np.where(df_zsdr['SD Document'].astype(str).str.startswith(('SA2', 'SA4', 'SB')), 'Yes', 'No')
 
@@ -246,6 +259,14 @@ def process_data(df_zsdr, df_tms, df_masters):
         [df_zsdr['Loading Date'].notna(), df_zsdr['Register Date'].notna(), df_zsdr['Accept Date'].notna(), df_zsdr['Tender Date'].notna()],
         ['Loading', 'Register', 'Accept', 'Tender'], default=''
     )
+
+    # Put every computed helper column (Type of Truck, SM, Sales LGS, the
+    # merged TMS dates, Is SA2/SA4/SB, Are blocked, Is Scrap, Vendor,
+    # Truck Vendor Type, TRAIN/TRUCK, Last Status — in the order they
+    # were computed above) to the LEFT of the original ZSDR002 columns,
+    # which keep their exact original order, untouched.
+    helper_cols = [c for c in df_zsdr.columns if c not in original_cols]
+    df_zsdr = df_zsdr[helper_cols + original_cols]
 
     return df_zsdr
 
