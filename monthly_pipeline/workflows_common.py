@@ -389,3 +389,94 @@ def read_tab_as_df(sheet, tab_name):
         return None
     records = ws.get_all_records(value_render_option='UNFORMATTED_VALUE')
     return pd.DataFrame(records)
+
+
+# ==========================================
+# Consolidation — final step of a refresh run. Upserts the ShipLevel
+# data for whichever month(s) were just refreshed into a single
+# 'ZSDR002_Consolidate' tab, keyed by (Month, Shipment_ID).
+#
+# Behavior, per the "remove stale rows" choice: for every month included
+# in `months_to_process`, that month's ENTIRE section of the
+# consolidated tab is replaced by whatever its '<MON>_ZSDR002_ShipLevel'
+# tab currently holds — matching shipments are updated in place, new
+# ones are inserted, and any shipment that no longer appears in that
+# month's ShipLevel tab is dropped rather than left stale. Every OTHER
+# month's rows already in the consolidated tab are left completely
+# untouched — this is what makes a single-month refresh safe to run
+# without clobbering the rest of the year.
+#
+# Columns are aligned by NAME (via pd.concat), not by position, so
+# months whose ShipLevel tabs have slightly different helper columns
+# still line up correctly — any column a given row doesn't have is
+# simply left blank for that row, instead of misaligning data into the
+# wrong column.
+# ==========================================
+CONSOLIDATE_TAB_NAME = 'ZSDR002_Consolidate'
+
+
+def consolidate_shipment_reports(sheet, months_to_process):
+    if not months_to_process:
+        logger.warning("consolidate_shipment_reports() called with no months — skipping.")
+        return
+
+    logger.info(f"Consolidating ShipLevel data into '{CONSOLIDATE_TAB_NAME}' for: {', '.join(months_to_process)}...")
+
+    # 1) Fresh ShipLevel rows for the month(s) just refreshed.
+    new_frames = []
+    for month_abbr in months_to_process:
+        ship_tab_name = f'{month_abbr.upper()}_ZSDR002_ShipLevel'
+        df_ship = read_tab_as_df(sheet, ship_tab_name)
+        if df_ship is None or df_ship.empty:
+            logger.warning(f"[{month_abbr}] '{ship_tab_name}' missing or empty — nothing to consolidate for this month.")
+            continue
+        df_ship = df_ship.copy()
+        df_ship.insert(0, 'Month', month_abbr)
+        new_frames.append(df_ship)
+
+    df_new = pd.concat(new_frames, ignore_index=True, sort=False) if new_frames else pd.DataFrame(columns=['Month'])
+
+    # 2) Whatever the consolidated tab already holds.
+    df_existing = read_tab_as_df(sheet, CONSOLIDATE_TAB_NAME)
+    if df_existing is None or df_existing.empty:
+        df_existing = pd.DataFrame(columns=['Month'])
+    if 'Month' not in df_existing.columns:
+        df_existing['Month'] = ''
+
+    # 3) Drop this run's month(s) from the existing data — their section
+    #    gets fully replaced by df_new. Every other month passes through
+    #    untouched.
+    df_kept = df_existing[~df_existing['Month'].isin(months_to_process)].copy()
+
+    # 4) Union by column NAME (pd.concat aligns on labels automatically;
+    #    a column missing from one side comes back blank/NaN for those
+    #    rows rather than misaligning values).
+    df_consolidated = pd.concat([df_kept, df_new], ignore_index=True, sort=False)
+
+    lead_cols = [c for c in ['Month', 'Shipment_ID'] if c in df_consolidated.columns]
+    other_cols = [c for c in df_consolidated.columns if c not in lead_cols]
+    df_consolidated = df_consolidated[lead_cols + other_cols]
+
+    # Stable, human-friendly ordering: calendar month order, then
+    # Shipment_ID within each month.
+    if 'Month' in df_consolidated.columns and len(df_consolidated):
+        month_order = {m: i for i, m in enumerate(MONTH_ABBR)}
+        sort_key = df_consolidated['Month'].map(month_order).fillna(999)
+        sort_cols_df = pd.DataFrame({'_month_sort': sort_key})
+        if 'Shipment_ID' in df_consolidated.columns:
+            sort_cols_df['_shipment_id'] = df_consolidated['Shipment_ID'].astype(str)
+        df_consolidated = (
+            df_consolidated
+            .assign(**{c: sort_cols_df[c] for c in sort_cols_df.columns})
+            .sort_values(list(sort_cols_df.columns), kind='stable')
+            .drop(columns=list(sort_cols_df.columns))
+            .reset_index(drop=True)
+        )
+
+    ws = get_or_create_worksheet(sheet, CONSOLIDATE_TAB_NAME)
+    export_dataframe(ws, df_consolidated, CONSOLIDATE_TAB_NAME)
+
+    logger.info(
+        f"'{CONSOLIDATE_TAB_NAME}': upserted {len(df_new)} row(s) for {', '.join(months_to_process)}; "
+        f"preserved {len(df_kept)} row(s) from other months; {len(df_consolidated)} row(s) total."
+    )
