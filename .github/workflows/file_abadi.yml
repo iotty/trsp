@@ -6,13 +6,17 @@ name: File Abadi
 # dispatchDummyPipeline_) right after the Apps Script interface confirms
 # a new file has landed in the monthly staging folder.
 #
-# CURRENT SCOPE: this verifies Drive access — it authenticates, looks
-# for the expected ZSDR002_<month>_ and TMS_<month>_ files in the
-# staging folder, and writes a PASS/FAIL status directly into the
-# "Log_File" tab of the monthly Sheet (row = month, columns = ZSDR002 /
-# TMS). It does NOT download or transform the actual data yet — extend
-# the "Check staged files" step (or add steps after it) once real
-# ingestion logic is ready.
+# SCOPE:
+#   1) "Check staged files and log to Sheet" verifies Drive access and
+#      writes a PASS/FAIL status into the "Log_File" tab (row = month,
+#      columns = ZSDR002 / TMS).
+#   2) "Run monthly workflows" implements Workflow 0-2 from the existing
+#      production pipeline (TMS prep, ZSDR002 SKU-level enrichment,
+#      shipment-level rollup), scoped to this month's staged files, and
+#      writes the results into per-month tabs in the monthly Sheet:
+#        <Mon>_TMS, <Mon>_ZSDR002, <MON>_ZSDR002_ShipLevel
+#      Each tab is fully cleared and rewritten every run, so re-running
+#      after a re-upload replaces the old data rather than appending.
 #
 # This is a SEPARATE workflow file from the existing production
 # `pipeline.yml`, so it runs independently without touching the current
@@ -52,3 +56,15 @@ jobs:
           MONTHLY_TARGET_SHEET_ID: ${{ secrets.MONTHLY_TARGET_SHEET_ID }}
           UPLOAD_MONTH: ${{ github.event.inputs.month }}
         run: python monthly_pipeline/check_staged_files.py
+
+      - name: Run monthly workflows (TMS prep, ZSDR002 SKU-level, Shipment-level)
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          MONTHLY_STAGING_FOLDER_ID: ${{ secrets.MONTHLY_STAGING_FOLDER_ID }}
+          MONTHLY_TARGET_SHEET_ID: ${{ secrets.MONTHLY_TARGET_SHEET_ID }}
+          # Reuses the SAME secret the existing production pipeline.yml
+          # already has configured in this repo — this is the production
+          # Sheet ID, used here only to read master data cross-sheet.
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          UPLOAD_MONTH: ${{ github.event.inputs.month }}
+        run: python monthly_pipeline/run_monthly_workflows.py
