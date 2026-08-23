@@ -28,6 +28,48 @@ import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
+
+# ==========================================
+# Robust date parsing.
+#
+# ROOT CAUSE of the "every date shows as 1970-01-01" bug: when the
+# source Excel export stores a date cell as a plain number (Excel's
+# internal date serial, e.g. 45500) instead of a cell that openpyxl
+# recognizes as a formatted date, pandas reads that column as int/float
+# — not as a datetime64 column. Calling plain pd.to_datetime(...) on a
+# numeric value with no `unit=` treats the number as nanoseconds since
+# 1970-01-01, not as an Excel day-serial. 45500 nanoseconds after epoch
+# is still, for all practical purposes, 1970-01-01 00:00:00 — which
+# after formatting/truncating the time portion is exactly the "every
+# date is 1970-01-01" symptom.
+#
+# This helper checks, per column (and per cell, since a column can be a
+# mix of real numbers and text depending on how each row's cell was
+# saved), whether the value is numeric — if so it's decoded as an Excel
+# day-serial (origin 1899-12-30, pandas' standard convention which
+# already accounts for Excel's leap-year bug) — otherwise it's parsed
+# as a normal date string. Already-parsed datetime64 columns pass
+# through untouched.
+# ==========================================
+_EXCEL_EPOCH = '1899-12-30'
+
+
+def _to_datetime_smart(series):
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return series
+
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_datetime(series, unit='D', origin=_EXCEL_EPOCH, errors='coerce')
+
+    def parse_one(v):
+        if pd.isna(v):
+            return pd.NaT
+        if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+            return pd.to_datetime(v, unit='D', origin=_EXCEL_EPOCH, errors='coerce')
+        return pd.to_datetime(v, dayfirst=True, errors='coerce')
+
+    return series.apply(parse_one)
+
 logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     level=logging.INFO,
@@ -110,7 +152,7 @@ def load_master_data(gc, production_sheet_id):
 def preprocess_tms(df_tms):
     logger.info("Workflow 0: standardizing TMS date columns...")
     existing_cols = [c for c in TMS_DATE_COLUMNS if c in df_tms.columns]
-    df_tms[existing_cols] = df_tms[existing_cols].apply(pd.to_datetime, dayfirst=True, errors='coerce')
+    df_tms[existing_cols] = df_tms[existing_cols].apply(_to_datetime_smart)
     return df_tms
 
 
@@ -131,7 +173,7 @@ def process_data(df_zsdr, df_tms, df_masters):
     d_cols = [c for c in ['Release Date', 'SO Create Date', 'DO Create Date', 'Schedule Date', 'Act. Gds Mvmnt Date'] if c in df_zsdr.columns]
     t_cols = [c for c in ['Release Time', 'SO Create Time', 'DO Create Time'] if c in df_zsdr.columns]
 
-    df_zsdr[d_cols] = df_zsdr[d_cols].apply(pd.to_datetime, dayfirst=True, errors='coerce')
+    df_zsdr[d_cols] = df_zsdr[d_cols].apply(_to_datetime_smart)
     for c in t_cols:
         df_zsdr[c] = pd.to_datetime(df_zsdr[c], format='%H:%M:%S', errors='coerce').dt.time
 
