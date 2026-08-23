@@ -1,0 +1,44 @@
+name: File Abadi
+
+# -----------------------------------------------------------------------
+# "File Abadi" — placeholder workflow for the new Jan-Dec / ZSDR002 + TMS
+# monthly upload interface. It intentionally does NOT process any data
+# yet — it just confirms the dispatch wiring from Apps Script
+# (Code.gs / dispatchDummyPipeline_) works end-to-end before real
+# ingestion logic is built.
+#
+# This is a SEPARATE workflow file from the existing production
+# `pipeline.yml`, so it can be triggered independently without touching
+# the current TMS/ZSDR reporting pipeline.
+# -----------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Month key passed from the Apps Script interface (e.g. Jan, Aug)'
+        required: false
+        type: string
+
+jobs:
+  dummy-run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Report dispatch received
+        run: |
+          echo "File Abadi triggered successfully."
+          echo "Month input received: ${{ github.event.inputs.month }}"
+          echo "No processing logic is wired up yet — replace this step with the real ingestion pipeline."
+          echo ""
+          echo "When real logic is added, staged files follow this naming convention:"
+          echo "  ZSDR002_<MONTH>_<DATEUPLOADED yyyyMMdd>_<CODEUNIQUE>.<ext>"
+          echo "  TMS_<MONTH>_<DATEUPLOADED yyyyMMdd>_<CODEUNIQUE>.<ext>"
+          echo "Only one file per <TYPE>_<MONTH> exists in staging at a time (Apps Script"
+          echo "replaces the previous one on re-upload, only after the new file is confirmed"
+          echo "uploaded), so a Drive query like:"
+          echo "  name contains 'ZSDR002_${{ github.event.inputs.month }}_'"
+          echo "will reliably return the single current file for that month."
