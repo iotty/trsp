@@ -1,24 +1,21 @@
 name: ZSDR Cur Month Pipeline
 
 # -----------------------------------------------------------------------
-# Upload-triggered pipeline for the TRSP dashboard's "Upload data" page.
+# Simple upload-triggered pipeline for the TRSP dashboard's "Upload
+# data" page. Reset to a plain 4-step flow, per explicit instruction:
 #
-# UploadApi.gs (bound to the TRSP production spreadsheet) uploads a
-# 'ZSDR_*'/'TMS_*' file straight to the production Drive staging folder
-# (the SAME folder/naming convention your original pipeline.yml already
-# reads from), then dispatches this workflow via
-# dispatchCurMonthPipeline_() / finalizeUpload() once BOTH files for the
-# upload are finalized.
-#
-# cur_month_pipeline.py downloads the most recently created pair from
-# that folder, runs Workflow 0-2 (TMS prep, ZSDR002 SKU-level
-# enrichment, shipment-level rollup) against them using current master
-# data, and writes the shipment-level result into ZSDR_Cur_Month. TMS
-# data is used only as processing input -- no separate TMS output tab
-# is written.
-#
-# This does NOT touch ZSDR_Abadi -- see archive_closed_orders.yml for
-# the separate, scheduled step that migrates closed rows there.
+#   1. User uploads a ZSDR002 file and a TMS file.
+#   2. UploadApi.gs uploads them straight to the production Drive
+#      staging folder ('ZSDR_*'/'TMS_*' naming -- same convention your
+#      original pipeline.yml already reads from).
+#   3. UploadApi.gs dispatches THIS workflow via
+#      dispatchCurMonthPipeline_() / finalizeUpload() once both files
+#      are finalized.
+#   4. cur_month_pipeline.py downloads the latest pair, computes
+#      ZSDR002's helper columns (Workflow 1), and writes each file back
+#      into the Sheet as a plain full-replace: ZSDR002 -> ZSDR_Cur_Month,
+#      TMS -> TMS_Cur_Month. No shipment-level rollup, no filtering, no
+#      archiving.
 # -----------------------------------------------------------------------
 
 on:
