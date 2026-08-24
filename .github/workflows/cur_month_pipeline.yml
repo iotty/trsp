@@ -1,0 +1,47 @@
+name: ZSDR Cur Month Pipeline
+
+# -----------------------------------------------------------------------
+# Upload-triggered pipeline for the TRSP dashboard's "Upload data" page.
+#
+# UploadApi.gs (bound to the TRSP production spreadsheet) stages an
+# uploaded ZSDR002/TMS file into a new "Staging_ZSDR002_<timestamp>" /
+# "Staging_TMS_<timestamp>" tab, then dispatches this workflow via
+# dispatchCurMonthPipeline_() / finalizeUpload() once BOTH files for the
+# upload are staged.
+#
+# cur_month_pipeline.py finds the most recently staged pair, runs
+# Workflow 0-2 (TMS prep, ZSDR002 SKU-level enrichment, shipment-level
+# rollup) against them using current master data, and writes the
+# shipment-level result into ZSDR_Cur_Month. TMS data is used only as
+# processing input -- no separate TMS output tab is written.
+#
+# This does NOT touch ZSDR_Abadi -- see archive_closed_orders.yml for
+# the separate, scheduled step that migrates closed rows there.
+# -----------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-cur-month-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r monthly_pipeline/requirements.txt
+
+      - name: Run ZSDR_Cur_Month pipeline
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+        run: python monthly_pipeline/cur_month_pipeline.py
