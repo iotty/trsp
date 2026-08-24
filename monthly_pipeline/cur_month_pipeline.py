@@ -1,83 +1,52 @@
 """
 cur_month_pipeline.py
 -----------------------------------------------------------------------
-Upload-triggered pipeline for the TRSP dashboard's "Upload data" page
-(UploadApi.gs, bound directly to the TRSP production spreadsheet).
+Simple upload pipeline for the TRSP dashboard's "Upload data" page.
+Reset to just this, per explicit instruction -- no shipment-level
+rollup, no month tagging, no archiving, no column filtering:
 
-UploadApi.gs uploads a file straight to the production Drive staging
-folder -- the SAME folder and 'ZSDR_'/'TMS_' naming convention your
-original main.py/pipeline.yml already uses -- then dispatches this
-workflow (see dispatchCurMonthPipeline_() / finalizeUpload() in
-UploadApi.gs). This script:
+  1. User uploads a ZSDR002 file and a TMS file.
+  2. UploadApi.gs uploads them straight to the production Drive staging
+     folder ('ZSDR_*' / 'TMS_*' naming -- same convention your original
+     main.py already used).
+  3. UploadApi.gs dispatches this GitHub Action (finalizeUpload() ->
+     dispatchCurMonthPipeline_()), which downloads the latest 'ZSDR_*'
+     and 'TMS_*' file from that folder.
+  4. Each file is written straight back into the Sheet:
+       ZSDR002 (with helper columns computed -- Type of Truck, SM,
+         Sales LGS, merged TMS dates, Is SA2,SA4,SB, Are blocked,
+         Is Scrap, Vendor, Truck Vendor Type, TRAIN/TRUCK, Last Status)
+         -> 'ZSDR_Cur_Month'
+       TMS (dates standardized) -> 'TMS_Cur_Month'
+     Both are plain full-replace writes (export_dataframe: clears and
+     rewrites the whole tab, header included) -- no filtering against
+     an existing header row, no shipment-level grouping.
 
-  1. Downloads the most recently created 'ZSDR_*' and 'TMS_*' file from
-     that staging folder (download_latest_file() in workflows_common.py,
-     verbatim from the original main.py -- including skiprows=1 for TMS,
-     skiprows=0 for ZSDR, matching the original export layouts exactly).
-  2. Runs Workflow 0 (TMS date prep) and Workflow 1 (ZSDR002 SKU-level
-     enrichment) against them, using CURRENT master data
-     (Master_Truck_Input / Master_Days_Input / Master_Sales_LGS) from
-     the same spreadsheet.
-  3. Runs Workflow 2 (shipment-level rollup).
-  4. Tags every row with the current month (3-letter abbreviation,
-     e.g. 'Aug') in a 'Month' column, and writes the result into
-     ZSDR_Cur_Month -- a full replace of the DATA ROWS there (the
-     header row is left untouched, matching how Config.gs describes
-     ZSDR_Cur_Month: "month-to-date, open or closed").
-
-TMS data is used only as processing input -- this script never writes
-a standalone TMS output tab (per explicit instruction: "no need to
-copy the TMS").
-
-This is a straight Drive-download read, not a Sheets-tab read -- a
-prior version of this script read 'Staging_ZSDR002_*'/'Staging_TMS_*'
-tabs that UploadApi.gs wrote via a slow, fragile Apps Script ->
-throwaway-Sheets-conversion -> setValues() path (the source of the
-transient "HTTP 503" failures seen in practice). Downloading the raw
-file straight from Drive and reading it with pandas/openpyxl -- same
-as your original production main.py -- avoids that whole class of
-problem, and is considerably faster for a large file.
-
-This does NOT touch ZSDR_Abadi. Moving closed (GI'd) rows out of
-ZSDR_Cur_Month into ZSDR_Abadi once a month ends is a separate,
-scheduled step -- see archive_closed_orders.py.
+NOTE: this REPLACES a more elaborate version of this same script that
+also ran create_shipment_report() (Workflow 2) and wrote a
+shipment-level result. That's been removed here, per instruction to
+reset back to this simple 4-step flow. create_shipment_report(),
+consolidate_shipment_reports(), and archive_closed_orders.py still
+exist in this repo but are no longer called from this pipeline --
+archive_closed_orders.py in particular now assumes a 'Month'/
+'Shipment_ID'-tagged ZSDR_Cur_Month that this script no longer
+produces, so it's effectively orphaned unless you want it reconnected.
 
 Required environment variables:
     GOOGLE_CREDENTIALS   Service account JSON.
-    TARGET_SHEET_ID      The TRSP production spreadsheet's ID (the same
-                          spreadsheet UploadApi.gs is bound to, and the
-                          same secret already used for master data by
-                          the earlier monthly-upload-interface scripts).
-    STAGING_FOLDER_ID    The production Drive staging folder ID -- the
-                          SAME folder your original pipeline.yml already
-                          reads 'TMS_*'/'ZSDR_*' from (reuse that
-                          secret's value here).
-
-Optional:
-    PIPELINE_TIMEZONE    IANA timezone name used to determine "current
-                          month" (default 'Asia/Jakarta').
+    TARGET_SHEET_ID      The TRSP production spreadsheet's ID.
+    STAGING_FOLDER_ID    The production Drive staging folder ID (same
+                          folder your original pipeline.yml already
+                          reads 'TMS_*'/'ZSDR_*' from).
 """
-import os
-from datetime import datetime
-
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    ZoneInfo = None
-
 from workflows_common import (
-    logger, MONTH_ABBR, get_env, authenticate_services, load_master_data,
-    download_latest_file, preprocess_tms, process_data, create_shipment_report,
-    get_or_create_worksheet, export_dataframe_header_driven,
+    logger, get_env, authenticate_services, load_master_data,
+    download_latest_file, preprocess_tms, process_data,
+    get_or_create_worksheet, export_dataframe,
 )
 
-CUR_MONTH_TAB_NAME = 'ZSDR_Cur_Month'
-
-
-def current_month_abbr():
-    tz_name = os.environ.get('PIPELINE_TIMEZONE', 'Asia/Jakarta')
-    now = datetime.now(ZoneInfo(tz_name)) if ZoneInfo else datetime.utcnow()
-    return MONTH_ABBR[now.month - 1]
+ZSDR_TAB_NAME = 'ZSDR_Cur_Month'
+TMS_TAB_NAME = 'TMS_Cur_Month'
 
 
 def main():
@@ -96,21 +65,14 @@ def main():
 
     df_tms_clean = preprocess_tms(df_tms_raw)
     df_zsdr_sku = process_data(df_zsdr_raw, df_tms_clean, dict_masters)
-    df_shipment = create_shipment_report(df_zsdr_sku)
 
-    month_abbr = current_month_abbr()
-    df_shipment = df_shipment.copy()
-    if 'Month' in df_shipment.columns:
-        df_shipment = df_shipment.drop(columns=['Month'])
-    df_shipment.insert(0, 'Month', month_abbr)
+    ws_zsdr = get_or_create_worksheet(sheet, ZSDR_TAB_NAME)
+    export_dataframe(ws_zsdr, df_zsdr_sku, ZSDR_TAB_NAME)
+    logger.info(f"'{ZSDR_TAB_NAME}': wrote {len(df_zsdr_sku)} row(s) (source file modified {zsdr_mod_time}).")
 
-    ws_cur = get_or_create_worksheet(sheet, CUR_MONTH_TAB_NAME)
-    export_dataframe_header_driven(ws_cur, df_shipment, CUR_MONTH_TAB_NAME)
-
-    logger.info(
-        f"'{CUR_MONTH_TAB_NAME}': {len(df_shipment)} shipment row(s) written for {month_abbr} "
-        f"(ZSDR modified {zsdr_mod_time}, TMS modified {tms_mod_time})."
-    )
+    ws_tms = get_or_create_worksheet(sheet, TMS_TAB_NAME)
+    export_dataframe(ws_tms, df_tms_clean, TMS_TAB_NAME)
+    logger.info(f"'{TMS_TAB_NAME}': wrote {len(df_tms_clean)} row(s) (source file modified {tms_mod_time}).")
 
 
 if __name__ == "__main__":
