@@ -55,18 +55,35 @@ from googleapiclient.http import MediaIoBaseDownload
 # ==========================================
 _EXCEL_EPOCH = '1899-12-30'
 
+# Excel itself only represents dates up to 9999-12-31 (serial 2958465).
+# BUG FIX: pd.to_datetime(..., unit='D') converts a numeric value to a
+# date by multiplying it by nanoseconds-per-day internally. If a numeric
+# cell that was never actually a date sneaks into a "date" column (a
+# stray ID, a misaligned column, a garbage/huge value from a corrupted
+# export), that multiply can overflow and crash the whole run with
+# "FloatingPointError: overflow encountered in multiply" instead of the
+# errors='coerce' -> NaT that was clearly intended. Values outside
+# Excel's own valid date-serial range are replaced with NaN BEFORE the
+# multiply ever happens, so they cleanly become NaT (same end result
+# errors='coerce' already promises) instead of crashing the pipeline.
+_EXCEL_SERIAL_MIN = -100000  # generous buffer; still well before 1899
+_EXCEL_SERIAL_MAX = 2958465  # Excel's own maximum date, 9999-12-31
+
 
 def _to_datetime_smart(series):
     if pd.api.types.is_datetime64_any_dtype(series):
         return series
 
     if pd.api.types.is_numeric_dtype(series):
-        return pd.to_datetime(series, unit='D', origin=_EXCEL_EPOCH, errors='coerce')
+        safe = series.where(series.between(_EXCEL_SERIAL_MIN, _EXCEL_SERIAL_MAX))
+        return pd.to_datetime(safe, unit='D', origin=_EXCEL_EPOCH, errors='coerce')
 
     def parse_one(v):
         if pd.isna(v):
             return pd.NaT
         if isinstance(v, (int, float, np.integer, np.floating)) and not isinstance(v, bool):
+            if not (_EXCEL_SERIAL_MIN <= v <= _EXCEL_SERIAL_MAX):
+                return pd.NaT
             return pd.to_datetime(v, unit='D', origin=_EXCEL_EPOCH, errors='coerce')
         return pd.to_datetime(v, dayfirst=True, errors='coerce')
 
