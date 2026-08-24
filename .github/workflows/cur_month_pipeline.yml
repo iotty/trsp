@@ -3,17 +3,19 @@ name: ZSDR Cur Month Pipeline
 # -----------------------------------------------------------------------
 # Upload-triggered pipeline for the TRSP dashboard's "Upload data" page.
 #
-# UploadApi.gs (bound to the TRSP production spreadsheet) stages an
-# uploaded ZSDR002/TMS file into a new "Staging_ZSDR002_<timestamp>" /
-# "Staging_TMS_<timestamp>" tab, then dispatches this workflow via
+# UploadApi.gs (bound to the TRSP production spreadsheet) uploads a
+# 'ZSDR_*'/'TMS_*' file straight to the production Drive staging folder
+# (the SAME folder/naming convention your original pipeline.yml already
+# reads from), then dispatches this workflow via
 # dispatchCurMonthPipeline_() / finalizeUpload() once BOTH files for the
-# upload are staged.
+# upload are finalized.
 #
-# cur_month_pipeline.py finds the most recently staged pair, runs
-# Workflow 0-2 (TMS prep, ZSDR002 SKU-level enrichment, shipment-level
-# rollup) against them using current master data, and writes the
-# shipment-level result into ZSDR_Cur_Month. TMS data is used only as
-# processing input -- no separate TMS output tab is written.
+# cur_month_pipeline.py downloads the most recently created pair from
+# that folder, runs Workflow 0-2 (TMS prep, ZSDR002 SKU-level
+# enrichment, shipment-level rollup) against them using current master
+# data, and writes the shipment-level result into ZSDR_Cur_Month. TMS
+# data is used only as processing input -- no separate TMS output tab
+# is written.
 #
 # This does NOT touch ZSDR_Abadi -- see archive_closed_orders.yml for
 # the separate, scheduled step that migrates closed rows there.
@@ -44,4 +46,5 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          STAGING_FOLDER_ID: ${{ secrets.STAGING_FOLDER_ID }}
         run: python monthly_pipeline/cur_month_pipeline.py
