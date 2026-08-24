@@ -18,6 +18,7 @@ it keeps changing.
 """
 import os
 import sys
+import io
 import json
 import logging
 from datetime import time
@@ -27,6 +28,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 
 # ==========================================
@@ -144,6 +146,45 @@ def load_master_data(gc, production_sheet_id):
             logger.warning(f"Master tab [{name}] not found in production Sheet. Skipped.")
             df_masters[name] = pd.DataFrame()
     return df_masters
+
+
+# ==========================================
+# Drive download — verbatim from production main.py's
+# download_latest_file(), used by cur_month_pipeline.py to read the
+# 'ZSDR_*'/'TMS_*' files UploadApi.gs uploads straight to the
+# production staging folder (the SAME folder/naming convention your
+# original pipeline.yml already reads from). Picks the most recently
+# CREATED file matching the given prefix.
+# ==========================================
+def download_latest_file(drive_svc, folder_id, prefix, skip_rows=0):
+    logger.info(f"Looking for a file starting with '{prefix}' in the staging folder...")
+    query = f"'{folder_id}' in parents and name contains '{prefix}' and trashed = false"
+    results = drive_svc.files().list(
+        q=query, orderBy="createdTime desc", fields="files(id, name, modifiedTime)", pageSize=1
+    ).execute()
+
+    files = results.get('files', [])
+    if not files:
+        raise FileNotFoundError(f"No file starting with '{prefix}' found in the staging folder.")
+
+    file_id = files[0]['id']
+    file_name = files[0]['name']
+    modified_time = files[0].get('modifiedTime')
+
+    logger.info(f"Found latest file: {file_name}. Downloading...")
+
+    bio = io.BytesIO()
+    request = drive_svc.files().get_media(fileId=file_id)
+    downloader = MediaIoBaseDownload(bio, request)
+
+    while downloader.next_chunk()[1] is False:
+        pass
+
+    bio.seek(0)
+    df = pd.read_excel(bio, engine='openpyxl', skiprows=skip_rows)
+    logger.info(f"Read '{prefix}': {len(df)} row(s).")
+
+    return df, modified_time
 
 
 # ==========================================
