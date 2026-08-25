@@ -20,15 +20,22 @@ touched belong on the PRODUCTION Sheet's 'ZSDR_Abadi' tab (closed
 months) or 'ZSDR_Cur_Month' tab (the month still in progress, compared
 against today's actual calendar date) and mirror there accordingly.
 'ZSDR_Abadi' can never receive the current month's rows, even
-indirectly through the cross-month consolidation — that exclusion is
-enforced in one place (mirror_to_abadi()) so it can't regress per-caller.
+indirectly — that exclusion is enforced centrally so it can't regress
+per-caller.
+
+UPLOAD MODE HAS NO INTERMEDIATE MONTHLY SHEET. Earlier versions of this
+pipeline wrote <Mon>_TMS / <Mon>_ZSDR002 / <MON>_ZSDR002_ShipLevel tabs
+into a separate "monthly Sheet" and cross-month-deduped by reading them
+all back. Upload mode no longer does this at all — it goes straight
+from the staged Drive files to the production Sheet: a closed month's
+freshly computed shipment report is upserted directly against whatever
+'ZSDR_Abadi' already has (see upsert_month_into_abadi()); the current
+month's is a straight full replace of 'ZSDR_Cur_Month', same as before.
+REFRESH MODE STILL USES THE MONTHLY SHEET (see its own note below) —
+that's a separate, not-yet-updated concern.
 
 Required environment variables (both modes):
     GOOGLE_CREDENTIALS         Service account JSON (shared repo secret).
-    MONTHLY_TARGET_SHEET_ID    Spreadsheet ID of the monthly Sheet —
-                                where <Mon>_TMS / <Mon>_ZSDR002 /
-                                <MON>_ZSDR002_ShipLevel / ZSDR002_Consolidate
-                                live.
     TARGET_SHEET_ID            Spreadsheet ID of the PRODUCTION Sheet —
                                 where Master_Truck_Input /
                                 Master_Days_Input / Master_Sales_LGS are
@@ -45,7 +52,14 @@ Upload mode also needs:
                                 different folder.
     UPLOAD_MONTH                Month key, e.g. "Aug".
 
-Refresh mode also needs:
+Refresh mode also needs (UNCHANGED / STILL MONTHLY-SHEET-BASED — see note
+above process_refresh() further down):
+    MONTHLY_TARGET_SHEET_ID    Spreadsheet ID of the monthly Sheet —
+                                where <Mon>_TMS / <Mon>_ZSDR002 /
+                                <MON>_ZSDR002_ShipLevel / ZSDR002_Consolidate
+                                live. Only months that still have data
+                                there (from before upload mode stopped
+                                writing to it) can be refreshed.
     REFRESH_MONTH               Optional. A single month key (e.g. "Aug")
                                 to refresh just that month. If unset or
                                 empty, EVERY month that currently has a
@@ -729,20 +743,128 @@ def mirror_to_cur_month(gc, production_sheet_id, df_shipment_month):
     export_dataframe_header_driven(ws, df_filtered, PRODUCTION_CUR_MONTH_TAB_NAME)
 
 
-def mirror_month_to_production(gc, production_sheet_id, monthly_sheet, month_abbr, df_shipment_month):
-    """Shared closed/current-month decision, used by both modes: is
-    month_abbr today's actual calendar month, or a closed one?"""
-    if month_abbr == current_month_abbr():
-        logger.info(f">>> {month_abbr} is the CURRENT month — mirroring only this month's shipment report into {PRODUCTION_CUR_MONTH_TAB_NAME}.")
-        mirror_to_cur_month(gc, production_sheet_id, df_shipment_month)
+# ==========================================
+# Upload-mode Abadi upsert. This is what replaced the monthly-Sheet-
+# based consolidate_shipment_reports() + mirror_to_abadi() for the
+# UPLOAD path specifically (refresh mode still uses that older pair —
+# see the note above run_refresh() further down).
+#
+# No intermediate sheet at all: reads 'ZSDR_Abadi' back from the
+# PRODUCTION Sheet itself, drops whatever rows it already has tagged
+# with THIS month (so a re-upload of an already-uploaded month fully
+# replaces that month's slice — no stale row left behind if the new
+# upload's shape differs from the old one), appends this month's freshly
+# computed rows, and re-applies the (Delivery, SM, Material) dedup
+# safety net against every OTHER month's existing rows too — an
+# accidental duplicate under a different month still resolves in favor
+# of the freshest upload, exactly like the old cross-month consolidation
+# did.
+# ==========================================
+UPSERT_DATE_COLUMNS = (
+    ['Release Date', 'SO Create Date', 'DO Create Date', 'Schedule Date', 'Act. Gds Mvmnt Date']
+    + TMS_DATE_COLUMNS + [f'{c} (TMS)' for c in TMS_DATE_COLUMNS]
+)
+UPSERT_TIME_COLUMNS = ['Release Time', 'SO Create Time', 'DO Create Time']
+
+
+def _format_upsert_date_time_columns(df):
+    """Formats real datetime64/time values in known date/time columns
+    into plain display strings — same format _stringify_dates_and_times
+    produces, but driven by COLUMN NAME rather than current dtype.
+    Needed because after concatenating freshly-computed rows (real
+    datetime64 values) with rows read back from the Sheet (already plain
+    strings), the column's dtype is no longer datetime64, so
+    _stringify_dates_and_times's dtype check would silently skip it."""
+    df = df.copy()
+
+    def fmt_date(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ''
+        if isinstance(v, (pd.Timestamp, _datetime)):
+            if pd.isna(v):
+                return ''
+            s = v.strftime('%Y-%m-%d %H:%M:%S')
+            return s[:-9] if s.endswith(' 00:00:00') else s
+        s = str(v).strip()
+        return '' if (not s or s.lower() == 'nat') else s
+
+    def fmt_time(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return ''
+        s = str(v).strip()
+        return '' if (not s or s.lower() in ('nat', 'none')) else s
+
+    for col in UPSERT_DATE_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(fmt_date)
+    for col in UPSERT_TIME_COLUMNS:
+        if col in df.columns:
+            df[col] = df[col].apply(fmt_time)
+    return df
+
+
+def _apostrophe_prefix_columns(df, cols):
+    """Same apostrophe-prefix trick export_dataframe_header_driven uses
+    for real datetime64 columns (forces Sheets to store literal text
+    instead of reinterpreting the string as its own ambiguous date
+    value), applied by COLUMN NAME instead of current dtype — needed
+    post-concat since these columns are plain strings by then, not
+    datetime64, so the dtype-based version wouldn't catch them."""
+    df = df.copy()
+    for col in cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda v: f"'{v}" if v else v)
+    return df
+
+
+def upsert_month_into_abadi(gc, production_sheet_id, month_abbr, df_shipment_month):
+    production_sheet = gc.open_by_key(production_sheet_id)
+    ws = get_or_create_worksheet(production_sheet, PRODUCTION_ABADI_TAB_NAME)
+
+    df_new = df_shipment_month.copy()
+    df_new['Month'] = month_abbr
+    df_new = _normalize_group_key_cols(df_new)
+    df_new = _format_upsert_date_time_columns(df_new)
+
+    existing = read_tab_as_df(production_sheet, PRODUCTION_ABADI_TAB_NAME)
+    if existing is not None and not existing.empty:
+        existing = _normalize_group_key_cols(existing)
+        if 'Month' in existing.columns:
+            existing_other_months = existing[existing['Month'] != month_abbr].copy()
+        else:
+            logger.warning(f"'{PRODUCTION_ABADI_TAB_NAME}' has existing rows with no 'Month' column — treating all of them as other months (none dropped).")
+            existing_other_months = existing.copy()
     else:
-        logger.info(f">>> {month_abbr} is a CLOSED month — consolidating across months and mirroring into {PRODUCTION_ABADI_TAB_NAME}.")
-        df_consolidated = consolidate_shipment_reports(monthly_sheet, [month_abbr])
-        mirror_to_abadi(gc, production_sheet_id, df_consolidated)
+        existing_other_months = pd.DataFrame(columns=df_new.columns)
+
+    upsert_key = [c for c in GROUP_KEY_COLS if c in df_new.columns]
+    combined = pd.concat([existing_other_months, df_new], ignore_index=True, sort=False)
+
+    before = len(combined)
+    # df_new rows are appended LAST, so keep='last' means a freshly
+    # uploaded row always wins any cross-month key collision.
+    combined = combined.drop_duplicates(subset=upsert_key, keep='last')
+    dropped = before - len(combined)
+    if dropped:
+        logger.warning(f"'{PRODUCTION_ABADI_TAB_NAME}': dropped {dropped} duplicate line item(s) sharing the same ({', '.join(upsert_key)}) across months during upsert.")
+
+    total_rows = len(combined)
+    combined = _apply_production_mirror_filter(combined) if total_rows else combined
+    combined = _apostrophe_prefix_columns(combined, UPSERT_DATE_COLUMNS + UPSERT_TIME_COLUMNS)
+
+    logger.info(
+        f"Upserting {month_abbr}'s {len(df_new)} row(s) into '{PRODUCTION_ABADI_TAB_NAME}' "
+        f"(kept {len(existing_other_months)} other-month row(s) untouched, {total_rows} total before "
+        f"the SA2/SA4/SB filter, {len(combined)} after)..."
+    )
+    export_dataframe_header_driven(ws, combined, PRODUCTION_ABADI_TAB_NAME)
 
 
 # ==========================================
 # Mode: upload — Workflows 0-2 for one month's freshly staged files.
+# No monthly Sheet involved — see the module docstring. Goes straight
+# from the staged Drive files to whichever production tab this month
+# belongs on.
 # ==========================================
 def run_upload():
     month_abbr = get_env('UPLOAD_MONTH')
@@ -751,7 +873,6 @@ def run_upload():
         sys.exit(1)
 
     staging_folder_id = get_env('STAGING_FOLDER_ID')
-    monthly_sheet_id = get_env('MONTHLY_TARGET_SHEET_ID')
     production_sheet_id = get_env('TARGET_SHEET_ID')
 
     logger.info(f"================ UPLOAD: Workflows 0-2 for {month_abbr} ================")
@@ -766,17 +887,12 @@ def run_upload():
     df_zsdr_sku = process_data(df_zsdr_raw, df_tms_clean, dict_masters)
     df_zsdr_shipment = create_shipment_report(df_zsdr_sku)
 
-    monthly_sheet = gc.open_by_key(monthly_sheet_id)
-
-    tms_tab_name = f"{month_abbr}_TMS"
-    sku_tab_name = f"{month_abbr}_ZSDR002"
-    ship_tab_name = f"{month_abbr.upper()}_ZSDR002_ShipLevel"
-
-    export_dataframe(get_or_create_worksheet(monthly_sheet, tms_tab_name), df_tms_clean, tms_tab_name)
-    export_dataframe(get_or_create_worksheet(monthly_sheet, sku_tab_name), df_zsdr_sku, sku_tab_name)
-    export_dataframe(get_or_create_worksheet(monthly_sheet, ship_tab_name), df_zsdr_shipment, ship_tab_name)
-
-    mirror_month_to_production(gc, production_sheet_id, monthly_sheet, month_abbr, df_zsdr_shipment)
+    if month_abbr == current_month_abbr():
+        logger.info(f">>> {month_abbr} is the CURRENT month — replacing {PRODUCTION_CUR_MONTH_TAB_NAME} with this month's shipment report.")
+        mirror_to_cur_month(gc, production_sheet_id, df_zsdr_shipment)
+    else:
+        logger.info(f">>> {month_abbr} is a CLOSED month — upserting this month's shipment report directly into {PRODUCTION_ABADI_TAB_NAME}.")
+        upsert_month_into_abadi(gc, production_sheet_id, month_abbr, df_zsdr_shipment)
 
     logger.info(f"================ FINISHED upload for {month_abbr} ================")
 
