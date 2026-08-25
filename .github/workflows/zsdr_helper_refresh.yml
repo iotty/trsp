@@ -1,0 +1,40 @@
+name: Refresh Helper Columns
+
+# Dispatched by the Apps Script upload interface's "Refresh" button
+# (triggerRefreshAllMonths() / dispatchRefreshWorkflow_()) — re-derives
+# helper columns for month(s) that already have data, using the CURRENT
+# master data, without needing a new file upload. inputs.month is
+# optional: empty refreshes every month that currently has data.
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Month key to refresh, e.g. Aug. Leave blank to refresh every month with existing data."
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  run-refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy openpyxl gspread google-auth google-api-python-client
+
+      - name: Run refresh workflow
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          MONTHLY_TARGET_SHEET_ID: ${{ secrets.MONTHLY_TARGET_SHEET_ID }}
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          REFRESH_MONTH: ${{ inputs.month }}
+        run: python zsdr_monthly_upload_pipeline.py refresh
