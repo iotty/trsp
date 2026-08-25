@@ -779,6 +779,11 @@ UPSERT_DATE_COLUMNS = (
 )
 UPSERT_TIME_COLUMNS = ['Release Time', 'SO Create Time', 'DO Create Time']
 
+# Safety-guard tuning for upsert_month_into_abadi() — see the comment at
+# its abort check for what this protects against.
+UPSERT_SAFETY_MIN_ROWS_TO_CHECK = 5     # below this, don't bother checking (too noisy on small test data)
+UPSERT_SAFETY_MIN_SURVIVAL_RATIO = 0.5  # abort if other months' row count drops below this fraction
+
 
 def _format_upsert_date_time_columns(df):
     """Formats real datetime64/time values into plain display strings —
@@ -913,6 +918,33 @@ def upsert_month_into_abadi(gc, production_sheet_id, month_abbr, df_shipment_mon
     total_rows = len(combined)
     combined = _apply_production_mirror_filter(combined) if total_rows else combined
     combined = _apostrophe_prefix_columns(combined, date_time_cols_formatted)
+
+    # SAFETY GUARD: export_dataframe_header_driven() clears the ENTIRE
+    # data range before writing, and this function's only protection
+    # against that clear losing other months' data is the read at the
+    # top of this function actually having succeeded. If read_tab_as_df()
+    # ever silently returned empty/partial data (API hiccup, wrong tab,
+    # a bug), we'd cheerfully clear the sheet and write back a
+    # near-empty result, permanently losing every other month. This
+    # check compares how many other-month rows existed before this run
+    # to how many would survive into the write — if that count collapses
+    # by more than UPSERT_SAFETY_MIN_SURVIVAL_RATIO, abort BEFORE
+    # touching the sheet rather than trust the read and write anyway.
+    # Small before-counts are exempt so a normal one-off filtered row
+    # doesn't trip this.
+    other_months_before_count = len(existing_other_months)
+    if other_months_before_count >= UPSERT_SAFETY_MIN_ROWS_TO_CHECK:
+        other_months_after_count = len(combined[combined['Month'] != month_abbr]) if 'Month' in combined.columns else 0
+        if other_months_after_count < other_months_before_count * UPSERT_SAFETY_MIN_SURVIVAL_RATIO:
+            raise RuntimeError(
+                f"SAFETY ABORT: '{PRODUCTION_ABADI_TAB_NAME}' had {other_months_before_count} row(s) belonging "
+                f"to month(s) other than '{month_abbr}' before this run, but only {other_months_after_count} "
+                f"would remain after this write — a drop of more than "
+                f"{int((1 - UPSERT_SAFETY_MIN_SURVIVAL_RATIO) * 100)}%. This looks like read_tab_as_df() failed "
+                f"to read the sheet's current data rather than a legitimate change, so refusing to clear/write "
+                f"'{PRODUCTION_ABADI_TAB_NAME}' — that write would have permanently wiped other months' data. "
+                f"Nothing has been touched on the sheet. Investigate before re-running."
+            )
 
     logger.info(
         f"Upserting {month_abbr}'s {len(df_new)} row(s) into '{PRODUCTION_ABADI_TAB_NAME}' "
