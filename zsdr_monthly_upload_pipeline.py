@@ -36,9 +36,13 @@ Required environment variables (both modes):
                                 ZSDR_Cur_Month get written.
 
 Upload mode also needs:
-    MONTHLY_STAGING_FOLDER_ID  Drive folder the Apps Script interface
-                                stages ZSDR002_<Mon>_*/TMS_<Mon>_* files
-                                into.
+    STAGING_FOLDER_ID           Drive folder the Apps Script interface
+                                stages ZSDR002_<Mon>_... and TMS_<Mon>_...
+                                files into. Same name, same value as the
+                                STAGING_FOLDER_ID Script Property on the
+                                Apps Script side — this is a REPO SECRET
+                                storing the identical folder ID, not a
+                                different folder.
     UPLOAD_MONTH                Month key, e.g. "Aug".
 
 Refresh mode also needs:
@@ -746,7 +750,7 @@ def run_upload():
         logger.error(f"Unrecognized month key '{month_abbr}' — expected one of {MONTH_ABBR}.")
         sys.exit(1)
 
-    staging_folder_id = get_env('MONTHLY_STAGING_FOLDER_ID')
+    staging_folder_id = get_env('STAGING_FOLDER_ID')
     monthly_sheet_id = get_env('MONTHLY_TARGET_SHEET_ID')
     production_sheet_id = get_env('TARGET_SHEET_ID')
 
