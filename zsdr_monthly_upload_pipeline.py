@@ -84,7 +84,7 @@ import os
 import sys
 import json
 import logging
-from datetime import time, datetime as _datetime
+from datetime import time, date as _date, datetime as _datetime
 
 import numpy as np
 import pandas as pd
@@ -768,13 +768,30 @@ UPSERT_TIME_COLUMNS = ['Release Time', 'SO Create Time', 'DO Create Time']
 
 
 def _format_upsert_date_time_columns(df):
-    """Formats real datetime64/time values in known date/time columns
-    into plain display strings — same format _stringify_dates_and_times
-    produces, but driven by COLUMN NAME rather than current dtype.
-    Needed because after concatenating freshly-computed rows (real
-    datetime64 values) with rows read back from the Sheet (already plain
-    strings), the column's dtype is no longer datetime64, so
-    _stringify_dates_and_times's dtype check would silently skip it."""
+    """Formats real datetime64/time values into plain display strings —
+    same format _stringify_dates_and_times produces, but driven by
+    COLUMN NAME rather than current dtype. Needed because after
+    concatenating freshly-computed rows (real datetime64 values) with
+    rows read back from the Sheet (already plain strings), the column's
+    dtype is no longer datetime64, so _stringify_dates_and_times's dtype
+    check would silently skip it.
+
+    Covers both the known UPSERT_DATE_COLUMNS/UPSERT_TIME_COLUMNS AND
+    any OTHER column that happens to hold real datetime64/Timestamp/
+    datetime.time values — e.g. 'Customer Ref. Date' or 'Latest Ship
+    Date', which come straight from ZSDR002/openpyxl auto-parsing a
+    date-formatted Excel cell into a native Timestamp without any
+    explicit pd.to_datetime() call in this pipeline. Any such column
+    left unformatted would still hold raw Timestamp objects at write
+    time, which gspread/requests cannot JSON-serialize, crashing the
+    upsert. Detecting by dtype here (not just by name) is what makes
+    this safe against a future column silently gaining the same issue.
+
+    Returns (formatted_df, date_time_col_names) — the second value is
+    every column name actually formatted, for the caller to pass to
+    _apostrophe_prefix_columns() afterward so post-concat prefixing
+    covers exactly the same set, named columns or not.
+    """
     df = df.copy()
 
     def fmt_date(v):
@@ -794,13 +811,45 @@ def _format_upsert_date_time_columns(df):
         s = str(v).strip()
         return '' if (not s or s.lower() in ('nat', 'none')) else s
 
+    def col_has_datetime_like_values(series):
+        if pd.api.types.is_datetime64_any_dtype(series):
+            return True
+        if series.dtype == object:
+            return series.map(lambda v: isinstance(v, (pd.Timestamp, _datetime, _date, time))).any()
+        return False
+
+    date_cols_done = set()
     for col in UPSERT_DATE_COLUMNS:
         if col in df.columns:
             df[col] = df[col].apply(fmt_date)
+            date_cols_done.add(col)
+
+    time_cols_done = set()
     for col in UPSERT_TIME_COLUMNS:
         if col in df.columns:
             df[col] = df[col].apply(fmt_time)
-    return df
+            time_cols_done.add(col)
+
+    # Safety net: any column not already handled above that still
+    # carries real datetime64/Timestamp/date/time values gets the same
+    # date-style formatting, and its name is reported back so it also
+    # gets apostrophe-prefixed post-concat.
+    extra_cols_done = set()
+    for col in df.columns:
+        if col in date_cols_done or col in time_cols_done:
+            continue
+        if col_has_datetime_like_values(df[col]):
+            df[col] = df[col].apply(fmt_date)
+            extra_cols_done.add(col)
+
+    if extra_cols_done:
+        logger.warning(
+            f"'{PRODUCTION_ABADI_TAB_NAME}' upsert: found datetime-like values in column(s) not in "
+            f"UPSERT_DATE_COLUMNS/UPSERT_TIME_COLUMNS — {sorted(extra_cols_done)}. Formatted them too "
+            f"so the write doesn't crash, but consider adding them to that list explicitly."
+        )
+
+    return df, sorted(date_cols_done | time_cols_done | extra_cols_done)
 
 
 def _apostrophe_prefix_columns(df, cols):
@@ -824,7 +873,7 @@ def upsert_month_into_abadi(gc, production_sheet_id, month_abbr, df_shipment_mon
     df_new = df_shipment_month.copy()
     df_new['Month'] = month_abbr
     df_new = _normalize_group_key_cols(df_new)
-    df_new = _format_upsert_date_time_columns(df_new)
+    df_new, date_time_cols_formatted = _format_upsert_date_time_columns(df_new)
 
     existing = read_tab_as_df(production_sheet, PRODUCTION_ABADI_TAB_NAME)
     if existing is not None and not existing.empty:
@@ -850,7 +899,7 @@ def upsert_month_into_abadi(gc, production_sheet_id, month_abbr, df_shipment_mon
 
     total_rows = len(combined)
     combined = _apply_production_mirror_filter(combined) if total_rows else combined
-    combined = _apostrophe_prefix_columns(combined, UPSERT_DATE_COLUMNS + UPSERT_TIME_COLUMNS)
+    combined = _apostrophe_prefix_columns(combined, date_time_cols_formatted)
 
     logger.info(
         f"Upserting {month_abbr}'s {len(df_new)} row(s) into '{PRODUCTION_ABADI_TAB_NAME}' "
