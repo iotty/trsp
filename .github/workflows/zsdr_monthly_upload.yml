@@ -3,9 +3,11 @@ name: Zsdr Monthly Upload
 # Dispatched by the Apps Script upload interface's dispatchMonthPipeline()
 # after a month's ZSDR002/TMS files are staged to Drive — POSTs here with
 # inputs.month set to a month key like "Aug". Runs Workflows 0-2 for that
-# month and mirrors the result into the correct production tab
-# (ZSDR_Abadi for a closed month, ZSDR_Cur_Month for the current month —
-# zsdr_monthly_upload_pipeline.py decides which based on today's date).
+# month and writes straight into the correct production tab (ZSDR_Abadi
+# for a closed month, upserted against whatever's already there;
+# ZSDR_Cur_Month for the current month, full replace — decided by
+# zsdr_monthly_upload_pipeline.py based on today's date). No intermediate
+# monthly Sheet is involved in this workflow.
 #
 # NOTE: match `python-version` below to whatever your existing
 # pipeline.yml already uses, if it differs — keeping both pipelines on
@@ -39,7 +41,6 @@ jobs:
         env:
           GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
           STAGING_FOLDER_ID: ${{ secrets.STAGING_FOLDER_ID }}
-          MONTHLY_TARGET_SHEET_ID: ${{ secrets.MONTHLY_TARGET_SHEET_ID }}
           TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
           UPLOAD_MONTH: ${{ inputs.month }}
         run: python zsdr_monthly_upload_pipeline.py upload
