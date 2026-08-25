@@ -71,13 +71,20 @@ Document, Material, Block, DO Means of Pack, Material Group, District
 Name, Sales District, Sales PIC Name, etc.). If ZSDR002's actual columns
 differ, process_data() below will need adjusting.
 
-DATE PARSING: the raw ZSDR002/TMS exports are MONTH-FIRST (M/D/YYYY),
-confirmed against a real row (a raw cell reading "7/28/2026" — day 28
-can't be a month, so that can only be July 28). _to_datetime_smart()
-below parses text dates with dayfirst=False accordingly. If a future
-export ever switches to a genuinely day-first locale, that needs
-flipping back — verify against a raw cell with day > 12 before changing
-it.
+DATE PARSING: ZSDR002 and TMS are two different exports and are NOT
+assumed to share a date format.
+  - ZSDR002 columns (Release Date, SO Create Date, DO Create Date,
+    Schedule Date, Act. Gds Mvmnt Date) are MONTH-FIRST (M/D/YYYY),
+    confirmed against a real row (a raw cell reading "7/28/2026" — day
+    28 can't be a month, so that can only be July 28). Parsed with
+    dayfirst=False.
+  - TMS_DATE_COLUMNS (Shipment Date, Request Date, Delivery Date, etc.)
+    are parsed with dayfirst=True, per explicit instruction.
+_to_datetime_smart() below takes a dayfirst= argument for exactly this
+reason — see its call sites in preprocess_tms() (dayfirst=True) and
+process_data() (dayfirst=False, the default). If either export's format
+assumption ever needs re-checking, verify against a raw, unformatted
+cell with day > 12 before changing it.
 """
 import io
 import os
@@ -154,7 +161,13 @@ _EXCEL_SERIAL_MIN = -100000  # generous buffer; still well before 1899
 _EXCEL_SERIAL_MAX = 2958465  # Excel's own maximum date, 9999-12-31
 
 
-def _to_datetime_smart(series):
+def _to_datetime_smart(series, dayfirst=False):
+    """dayfirst only affects the text-date fallback branch (ambiguous
+    string dates like "5/1/2026") — numeric Excel-serial values and
+    already-parsed datetime64 columns are unaffected either way.
+    ZSDR002 columns are confirmed month-first (dayfirst=False, see the
+    module docstring). TMS columns are a different export and are
+    parsed dayfirst=True — call sites below pass the right value."""
     if pd.api.types.is_datetime64_any_dtype(series):
         return series
 
@@ -169,7 +182,7 @@ def _to_datetime_smart(series):
             if not (_EXCEL_SERIAL_MIN <= v <= _EXCEL_SERIAL_MAX):
                 return pd.NaT
             return pd.to_datetime(v, unit='D', origin=_EXCEL_EPOCH, errors='coerce')
-        return pd.to_datetime(v, dayfirst=False, errors='coerce')
+        return pd.to_datetime(v, dayfirst=dayfirst, errors='coerce')
 
     return series.apply(parse_one)
 
@@ -256,9 +269,9 @@ def download_staged_file(drive_svc, folder_id, month_abbr, file_type, skip_rows=
 # Workflow 0 — TMS Data Prep
 # ==========================================
 def preprocess_tms(df_tms):
-    logger.info("Workflow 0: standardizing TMS date columns...")
+    logger.info("Workflow 0: standardizing TMS date columns (dayfirst=True)...")
     existing_cols = [c for c in TMS_DATE_COLUMNS if c in df_tms.columns]
-    df_tms[existing_cols] = df_tms[existing_cols].apply(_to_datetime_smart)
+    df_tms[existing_cols] = df_tms[existing_cols].apply(lambda s: _to_datetime_smart(s, dayfirst=True))
     return df_tms
 
 
