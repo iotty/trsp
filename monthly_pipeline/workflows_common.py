@@ -346,17 +346,34 @@ def process_data(df_zsdr, df_tms, df_masters):
 # ==========================================
 # Workflow 2 — ZSDR Shipment-Level (verbatim from production main.py)
 # ==========================================
+_SHIPMENT_ID_COLS = ['SM', 'Delivery', 'SD Document', 'Contract Number']
+
+
+def _assign_shipment_id(df):
+    """
+    Derives the Shipment_ID column the same way create_shipment_report()
+    always has: backfill across SM, Delivery, SD Document, Contract
+    Number (in that priority order), so a shipment is identified by
+    whichever of those columns is actually populated on a given row.
+    Factored out so consolidate_shipment_reports() can compute the same
+    Shipment_ID at the SKU level, before any shipment-level rollup
+    happens, for its (Shipment_ID, Material) upsert key.
+    """
+    df = df.copy()
+    for col in _SHIPMENT_ID_COLS:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip().replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
+    bfill_cols = [c for c in _SHIPMENT_ID_COLS if c in df.columns]
+    if bfill_cols:
+        df['Shipment_ID'] = df[bfill_cols].bfill(axis=1).iloc[:, 0].fillna('UNASSIGNED')
+    else:
+        df['Shipment_ID'] = 'UNASSIGNED'
+    return df
+
+
 def create_shipment_report(df_zsdr):
     logger.info("Workflow 2: rolling up to shipment-level...")
-    df_report = df_zsdr.copy()
-    cols_ref = ['SM', 'Delivery', 'SD Document', 'Contract Number']
-
-    for col in cols_ref:
-        if col in df_report.columns:
-            df_report[col] = df_report[col].astype(str).str.strip().replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
-
-    bfill_cols = [c for c in cols_ref if c in df_report.columns]
-    df_report['Shipment_ID'] = df_report[bfill_cols].bfill(axis=1).iloc[:, 0].fillna('UNASSIGNED')
+    df_report = _assign_shipment_id(df_zsdr)
 
     if 'Quantity' in df_report.columns:
         df_report['Quantity'] = pd.to_numeric(df_report['Quantity'], errors='coerce').fillna(0)
@@ -533,100 +550,141 @@ def read_tab_as_df(sheet, tab_name):
 
 
 # ==========================================
-# Consolidation — final step of a refresh run. Upserts the ShipLevel
-# data for whichever month(s) were just refreshed into a single
-# 'ZSDR002_Consolidate' tab, keyed by (Month, Shipment_ID).
+# Consolidation — final step of a refresh run. Builds a single
+# shipment-level 'ZSDR002_Consolidate' tab from SKU-level data across
+# EVERY month, deduped at the LINE-ITEM level.
 #
-# Behavior, per the "remove stale rows" choice: for every month included
-# in `months_to_process`, that month's ENTIRE section of the
-# consolidated tab is replaced by whatever its '<MON>_ZSDR002_ShipLevel'
-# tab currently holds — matching shipments are updated in place, new
-# ones are inserted, and any shipment that no longer appears in that
-# month's ShipLevel tab is dropped rather than left stale. Every OTHER
-# month's rows already in the consolidated tab are left completely
-# untouched — this is what makes a single-month refresh safe to run
-# without clobbering the rest of the year.
+# UPSERT KEY: (Shipment_ID, Material) — not (Month, Shipment_ID).
 #
-# Columns are aligned by NAME (via pd.concat), not by position, so
-# months whose ShipLevel tabs have slightly different helper columns
-# still line up correctly — any column a given row doesn't have is
-# simply left blank for that row, instead of misaligning data into the
-# wrong column.
+# BUG FIX: keying the old version by (Month, Shipment_ID) meant the same
+# shipment showing up in two different months' ZSDR002 uploads (e.g. the
+# same line item accidentally re-uploaded into the wrong month, or
+# staged twice) produced TWO rows in the consolidated tab — one per
+# month — each with the full shipment quantity, which then double-
+# counted anywhere those rows got summed. A real example that surfaced
+# this: SM2601300532 / MA10000842 / DA10051755 / SA20012313, quantity
+# 16000, showing up once under Jan and again, identically, under Feb.
+#
+# The fix works at the SKU level, before any shipment rollup happens:
+#   1. Read every month's SKU-level '<Mon>_ZSDR002' tab (a shipment's
+#      line items CAN legitimately span more than one month, so every
+#      month has to be considered, not just the one(s) just refreshed).
+#   2. Compute Shipment_ID per row (same SM/Delivery/SD Document/
+#      Contract Number backfill create_shipment_report() already uses).
+#   3. Upsert by (Shipment_ID, Material): if the same shipment+material
+#      line item appears more than once across months, keep exactly
+#      ONE row. A row from a month refreshed THIS run always wins over
+#      one that wasn't (it's the freshest data); if neither side was
+#      refreshed this run, the later calendar month wins, so a
+#      pre-existing stale duplicate still resolves deterministically
+#      the next time a full (REFRESH_MONTH unset) refresh runs.
+#   4. THEN group the deduped SKU-level rows by Shipment_ID and sum
+#      Quantity / Quantity in MT — the same aggregation
+#      create_shipment_report() does per month, just run once across
+#      the whole deduped, cross-month set, so a shipment whose line
+#      items are genuinely split across two different materials (or two
+#      different months) still sums correctly, without a duplicate
+#      upload inflating the total.
 # ==========================================
 CONSOLIDATE_TAB_NAME = 'ZSDR002_Consolidate'
 
 
 def consolidate_shipment_reports(sheet, months_to_process):
     """
-    Returns the final consolidated DataFrame (after the upsert) so the
-    caller can also mirror it elsewhere — see
-    mirror_consolidate_to_production() below — without re-reading every
-    ShipLevel tab a second time. Returns None if there was nothing to
-    consolidate.
+    Returns the final consolidated, shipment-level DataFrame (after the
+    (Shipment_ID, Material) upsert + groupby-sum) so the caller can also
+    mirror it elsewhere — see mirror_consolidate_to_production() below.
+    Returns None if there was nothing to consolidate.
     """
     if not months_to_process:
         logger.warning("consolidate_shipment_reports() called with no months — skipping.")
         return None
 
-    logger.info(f"Consolidating ShipLevel data into '{CONSOLIDATE_TAB_NAME}' for: {', '.join(months_to_process)}...")
+    existing_titles = {ws.title for ws in sheet.worksheets()}
+    all_months_with_data = [m for m in MONTH_ABBR if f'{m}_ZSDR002' in existing_titles]
+    if not all_months_with_data:
+        logger.warning("No '<Mon>_ZSDR002' tabs found — nothing to consolidate.")
+        return None
 
-    # 1) Fresh ShipLevel rows for the month(s) just refreshed.
-    new_frames = []
-    for month_abbr in months_to_process:
-        ship_tab_name = f'{month_abbr.upper()}_ZSDR002_ShipLevel'
-        df_ship = read_tab_as_df(sheet, ship_tab_name)
-        if df_ship is None or df_ship.empty:
-            logger.warning(f"[{month_abbr}] '{ship_tab_name}' missing or empty — nothing to consolidate for this month.")
+    logger.info(
+        f"Consolidating SKU-level data into '{CONSOLIDATE_TAB_NAME}' — "
+        f"reading {', '.join(all_months_with_data)}, with {', '.join(months_to_process)} treated as freshest..."
+    )
+
+    # 1) Every month's SKU-level data, tagged with which month it came
+    #    from and whether that month was just refreshed this run.
+    frames = []
+    for month_abbr in all_months_with_data:
+        df_sku = read_tab_as_df(sheet, f'{month_abbr}_ZSDR002')
+        if df_sku is None or df_sku.empty:
             continue
-        df_ship = df_ship.copy()
-        df_ship.insert(0, 'Month', month_abbr)
-        new_frames.append(df_ship)
+        df_sku = df_sku.copy()
+        df_sku['Month'] = month_abbr
+        df_sku['_refreshed_this_run'] = month_abbr in months_to_process
+        frames.append(df_sku)
 
-    df_new = pd.concat(new_frames, ignore_index=True, sort=False) if new_frames else pd.DataFrame(columns=['Month'])
+    if not frames:
+        logger.warning("Every '<Mon>_ZSDR002' tab was empty — nothing to consolidate.")
+        return None
 
-    # 2) Whatever the consolidated tab already holds.
-    df_existing = read_tab_as_df(sheet, CONSOLIDATE_TAB_NAME)
-    if df_existing is None or df_existing.empty:
-        df_existing = pd.DataFrame(columns=['Month'])
-    if 'Month' not in df_existing.columns:
-        df_existing['Month'] = ''
+    df_all_sku = pd.concat(frames, ignore_index=True, sort=False)
+    df_all_sku = _assign_shipment_id(df_all_sku)
 
-    # 3) Drop this run's month(s) from the existing data — their section
-    #    gets fully replaced by df_new. Every other month passes through
-    #    untouched.
-    df_kept = df_existing[~df_existing['Month'].isin(months_to_process)].copy()
+    if 'Material' not in df_all_sku.columns:
+        logger.warning("'Material' column not found in ZSDR002 data — upsert key falls back to Shipment_ID alone.")
+        df_all_sku['Material'] = ''
+    df_all_sku['Material'] = df_all_sku['Material'].fillna('').astype(str).str.strip()
 
-    # 4) Union by column NAME (pd.concat aligns on labels automatically;
-    #    a column missing from one side comes back blank/NaN for those
-    #    rows rather than misaligning values).
-    df_consolidated = pd.concat([df_kept, df_new], ignore_index=True, sort=False)
+    # 2) Upsert by (Shipment_ID, Material): sort so the row that
+    #    survives drop_duplicates(keep='last') is a refreshed-this-run
+    #    row over a stale one, and the later calendar month on a further
+    #    tie — see the header comment above for why.
+    month_order = {m: i for i, m in enumerate(MONTH_ABBR)}
+    df_all_sku['_sort_key'] = (
+        df_all_sku['_refreshed_this_run'].astype(int) * 100
+        + df_all_sku['Month'].map(month_order).fillna(-1)
+    )
+    df_all_sku = df_all_sku.sort_values('_sort_key', kind='stable')
 
-    lead_cols = [c for c in ['Month', 'Shipment_ID'] if c in df_consolidated.columns]
+    before = len(df_all_sku)
+    df_deduped = df_all_sku.drop_duplicates(subset=['Shipment_ID', 'Material'], keep='last')
+    dropped = before - len(df_deduped)
+    if dropped:
+        logger.warning(
+            f"'{CONSOLIDATE_TAB_NAME}': dropped {dropped} duplicate line item(s) "
+            f"sharing the same (Shipment_ID, Material) across months."
+        )
+
+    df_deduped = df_deduped.drop(columns=['_refreshed_this_run', '_sort_key'], errors='ignore')
+
+    # 3) NOW roll up to shipment-level: group by Shipment_ID alone and
+    #    sum Quantity / Quantity in MT — same aggregation as
+    #    create_shipment_report(), run once across the deduped set.
+    if 'Quantity' in df_deduped.columns:
+        df_deduped['Quantity'] = pd.to_numeric(df_deduped['Quantity'], errors='coerce').fillna(0)
+    if 'Quantity in MT' in df_deduped.columns:
+        df_deduped['Quantity in MT'] = pd.to_numeric(df_deduped['Quantity in MT'], errors='coerce').fillna(0)
+
+    group_cols = ['Shipment_ID']
+    agg_dict = {}
+    for col in df_deduped.columns:
+        if col in group_cols: continue
+        elif col in ['Quantity', 'Quantity in MT']: agg_dict[col] = 'sum'
+        else: agg_dict[col] = 'first'
+
+    df_consolidated = df_deduped.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
+
+    lead_cols = [c for c in ['Shipment_ID', 'Month'] if c in df_consolidated.columns]
     other_cols = [c for c in df_consolidated.columns if c not in lead_cols]
     df_consolidated = df_consolidated[lead_cols + other_cols]
-
-    # Stable, human-friendly ordering: calendar month order, then
-    # Shipment_ID within each month.
-    if 'Month' in df_consolidated.columns and len(df_consolidated):
-        month_order = {m: i for i, m in enumerate(MONTH_ABBR)}
-        sort_key = df_consolidated['Month'].map(month_order).fillna(999)
-        sort_cols_df = pd.DataFrame({'_month_sort': sort_key})
-        if 'Shipment_ID' in df_consolidated.columns:
-            sort_cols_df['_shipment_id'] = df_consolidated['Shipment_ID'].astype(str)
-        df_consolidated = (
-            df_consolidated
-            .assign(**{c: sort_cols_df[c] for c in sort_cols_df.columns})
-            .sort_values(list(sort_cols_df.columns), kind='stable')
-            .drop(columns=list(sort_cols_df.columns))
-            .reset_index(drop=True)
-        )
+    df_consolidated = df_consolidated.sort_values('Shipment_ID', kind='stable').reset_index(drop=True)
 
     ws = get_or_create_worksheet(sheet, CONSOLIDATE_TAB_NAME)
     export_dataframe(ws, df_consolidated, CONSOLIDATE_TAB_NAME)
 
     logger.info(
-        f"'{CONSOLIDATE_TAB_NAME}': upserted {len(df_new)} row(s) for {', '.join(months_to_process)}; "
-        f"preserved {len(df_kept)} row(s) from other months; {len(df_consolidated)} row(s) total."
+        f"'{CONSOLIDATE_TAB_NAME}': {len(df_consolidated)} shipment(s) after deduping "
+        f"{dropped} duplicate line item(s) across {len(all_months_with_data)} month(s)."
     )
 
     return df_consolidated
