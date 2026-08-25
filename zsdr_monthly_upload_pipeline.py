@@ -735,14 +735,25 @@ def mirror_to_abadi(gc, production_sheet_id, df_consolidated):
     export_dataframe_header_driven(ws, df_filtered, PRODUCTION_ABADI_TAB_NAME)
 
 
-def mirror_to_cur_month(gc, production_sheet_id, df_shipment_month):
+def mirror_to_cur_month(gc, production_sheet_id, df_shipment_month, month_abbr=None):
     """Mirrors ONE month's own shipment report — the month still in
     progress — into 'ZSDR_Cur_Month', fully replacing it. Unlike
     mirror_to_abadi(), there's no cross-month upsert here: 'ZSDR_Cur_Month'
-    represents exactly one month at a time."""
+    represents exactly one month at a time.
+
+    month_abbr stamps the 'Month' column — ZSDR_Cur_Month's header was
+    unified with ZSDR_Abadi's (both share the exact same 80-column
+    header), so it expects a 'Month' value same as Abadi does. Without
+    this, export_dataframe_header_driven() finds no 'Month' column in
+    the computed data and writes that column blank for every row
+    (harmless but pointless — the header column, e.g. 'Month', showing
+    blank in the sheet). Defaults to current_month_abbr() when omitted."""
     if df_shipment_month is None:
         logger.warning("mirror_to_cur_month(): nothing to mirror — skipping.")
         return
+
+    df_shipment_month = df_shipment_month.copy()
+    df_shipment_month['Month'] = month_abbr or current_month_abbr()
 
     total_rows = len(df_shipment_month)
     df_filtered = _apply_production_mirror_filter(df_shipment_month) if total_rows else df_shipment_month
@@ -983,7 +994,7 @@ def run_upload():
 
     if month_abbr == current_month_abbr():
         logger.info(f">>> {month_abbr} is the CURRENT month — replacing {PRODUCTION_CUR_MONTH_TAB_NAME} with this month's shipment report.")
-        mirror_to_cur_month(gc, production_sheet_id, df_zsdr_shipment)
+        mirror_to_cur_month(gc, production_sheet_id, df_zsdr_shipment, month_abbr)
     else:
         logger.info(f">>> {month_abbr} is a CLOSED month — upserting this month's shipment report directly into {PRODUCTION_ABADI_TAB_NAME}.")
         upsert_month_into_abadi(gc, production_sheet_id, month_abbr, df_zsdr_shipment)
@@ -1069,7 +1080,7 @@ def run_refresh():
             mirror_to_abadi(gc, production_sheet_id, df_consolidated)
         if df_ship_current_month is not None:
             logger.info(f">>> {current_month_abbr()} was refreshed this run — mirroring it into {PRODUCTION_CUR_MONTH_TAB_NAME} too.")
-            mirror_to_cur_month(gc, production_sheet_id, df_ship_current_month)
+            mirror_to_cur_month(gc, production_sheet_id, df_ship_current_month, current_month_abbr())
     else:
         logger.warning("No months were successfully refreshed — skipping consolidation and production mirror steps.")
 
