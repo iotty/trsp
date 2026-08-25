@@ -23,13 +23,16 @@ GUARANTEE: the original ZSDR002 columns are never touched. This script:
   4) Writes the result back (original columns unchanged + freshly
      computed helper columns), and regenerates
      "<MON>_ZSDR002_ShipLevel" from the refreshed SKU-level data.
-  5) Upserts every refreshed month's ShipLevel rows into a single
-     "ZSDR002_Consolidate" tab (on the monthly Sheet), keyed by
-     (Month, Shipment_ID). Only the month(s) refreshed this run are
-     touched there — matching shipments are updated, new ones inserted,
-     and shipments that no longer appear in that month's ShipLevel tab
-     are dropped from the consolidated tab. Every other month's rows
-     are left untouched.
+  5) Rebuilds "ZSDR002_Consolidate" (on the monthly Sheet) from
+     SKU-level data across EVERY month, upserted by
+     (Shipment_ID, Material) — not (Month, Shipment_ID). A shipment/
+     material line item that shows up more than once across months
+     (e.g. accidentally re-uploaded into the wrong month) is collapsed
+     to a single row, with whichever month was just refreshed this run
+     winning the tie; everything is then grouped by Shipment_ID and
+     Quantity/Quantity in MT summed to produce the final shipment-level
+     report. See the comment above consolidate_shipment_reports() in
+     workflows_common.py for the full rationale.
   6) FINAL STEP: mirrors that now-current consolidated data into a
      "ZSDR_Abadi" tab on the PRODUCTION Sheet (full replace copy, since
      step 5 already produced the correct complete state).
