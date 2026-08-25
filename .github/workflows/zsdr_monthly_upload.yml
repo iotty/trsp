@@ -1,0 +1,45 @@
+name: File Abadi
+
+# Dispatched by the Apps Script upload interface's dispatchMonthPipeline()
+# after a month's ZSDR002/TMS files are staged to Drive — POSTs here with
+# inputs.month set to a month key like "Aug". Runs Workflows 0-2 for that
+# month and mirrors the result into the correct production tab
+# (ZSDR_Abadi for a closed month, ZSDR_Cur_Month for the current month —
+# zsdr_monthly_upload_pipeline.py decides which based on today's date).
+#
+# NOTE: match `python-version` below to whatever your existing
+# pipeline.yml already uses, if it differs — keeping both pipelines on
+# the same Python version avoids subtle pandas/numpy behavior drift.
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Month key to process, e.g. Aug"
+        required: true
+        type: string
+
+jobs:
+  run-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy openpyxl gspread google-auth google-api-python-client
+
+      - name: Run upload workflow for ${{ inputs.month }}
+        env:
+          GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+          MONTHLY_STAGING_FOLDER_ID: ${{ secrets.MONTHLY_STAGING_FOLDER_ID }}
+          MONTHLY_TARGET_SHEET_ID: ${{ secrets.MONTHLY_TARGET_SHEET_ID }}
+          TARGET_SHEET_ID: ${{ secrets.TARGET_SHEET_ID }}
+          UPLOAD_MONTH: ${{ inputs.month }}
+        run: python zsdr_monthly_upload_pipeline.py upload
