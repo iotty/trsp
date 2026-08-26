@@ -449,7 +449,23 @@ def create_shipment_report(df_zsdr):
         elif col in ['Quantity', 'Quantity in MT']: agg_dict[col] = 'sum'
         else: agg_dict[col] = 'first'
 
-    return df_report.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
+    df_grouped = df_report.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
+
+    # 'first' above picks each column's first non-blank value independently,
+    # not "everything from whichever row came first" — so when a group's raw
+    # lines don't all carry the same 'Block' value, the rolled-up 'Block' and
+    # 'Are blocked' can end up sourced from two different raw rows and
+    # disagree with each other (e.g. 'Block' = 'Need Confirmation' pulled
+    # from one line, 'Are blocked' = 'Not Blocked' pulled from another).
+    # Re-derive 'Are blocked' here, after the rollup, from the group's own
+    # resulting 'Block'/'Material' values (same formula as process_data())
+    # so the two can never disagree.
+    if 'Block' in df_grouped.columns and 'Material' in df_grouped.columns:
+        mat_ok = df_grouped['Material'].notna() & (df_grouped['Material'] != '')
+        block_filled = df_grouped['Block'].notna() & (df_grouped['Block'].astype(str).str.strip() != '')
+        df_grouped['Are blocked'] = np.where(~mat_ok, '', np.where(block_filled, 'Blocked', 'Not Blocked'))
+
+    return df_grouped
 
 
 # ==========================================
