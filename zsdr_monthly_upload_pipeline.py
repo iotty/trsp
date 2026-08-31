@@ -343,7 +343,13 @@ def process_data(df_zsdr, df_tms, df_masters):
     is_scrap = do_pack.str.contains('scr') | mat_group.str.contains('bfr|mtbe')
     df_zsdr['Is Scrap'] = np.where((do_pack == '') & (mat_group == ''), '', np.where(is_scrap, 'SCRAP/BFR/MTBE', 'NOT SCRAP'))
 
-    is_export = df_zsdr['District Name'].fillna('').astype(str).str.lower() == 'export'
+    # 'Sales District' — not 'District Name' (that column doesn't exist in
+    # the ZSDR002 export at all, hence the KeyError; 'Sales District' is
+    # already the correct name used a few lines below for TRAIN/TRUCK/
+    # VESSEL, and matches the same column the Apps Script side keys off of
+    # for this exact Export check — see classifySalesDistrict_ in
+    # DashboardData.gs).
+    is_export = df_zsdr['Sales District'].fillna('').astype(str).str.lower() == 'export'
     not_scrap = df_zsdr['Is Scrap'] == 'NOT SCRAP'
     in_tms = df_zsdr['Delivery'].isin(tms_map.index)
 
