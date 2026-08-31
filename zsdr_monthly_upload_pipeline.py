@@ -394,20 +394,39 @@ def process_data(df_zsdr, df_tms, df_masters):
 # ==========================================
 _SHIPMENT_ID_COLS = ['SM', 'Delivery', 'SD Document', 'Contract Number']
 
-# The actual roll-up key. Grouping directly by these three real columns
-# — not a derived, backfilled Shipment_ID — means a shipment with
-# multiple materials produces one row PER material instead of collapsing
-# to a single row that only shows whichever material happened to sort
-# first. Quantity/Quantity in MT still sum within each (Delivery, SM,
-# Material) group; every other column still takes 'first'.
-GROUP_KEY_COLS = ['Delivery', 'SM', 'Material']
+# The actual roll-up key.
+#
+# ROOT CAUSE of pre-dispatch orders silently disappearing from
+# ZSDR_Cur_Month: the original key here was just (Delivery, SM,
+# Material). Both Delivery and SM are blank for any order that hasn't
+# been dispatched yet (SM is joined in from TMS keyed on Delivery — no
+# Delivery number yet means no TMS match, means no SM either). Two
+# different pre-dispatch orders that happen to share the same Material
+# therefore had an IDENTICAL group key — (blank, blank, that Material)
+# — and groupby collapsed them into a single row, silently dropping
+# every order but one and summing their quantities together under
+# whichever row's other columns 'first' happened to pick.
+#
+# Fixed by widening the key to every column that actually identifies an
+# order, per explicit instruction: Shipment_ID (the backfilled column
+# from _assign_shipment_id — already computed by the time this is used,
+# see call sites below), Master Contract Number, Delivery, SD Document,
+# Contract Number, and Material. SD Document/Contract Number/Master
+# Contract Number are assigned per order regardless of dispatch status,
+# so two pre-dispatch orders sharing a Material no longer collide.
+# Quantity/Quantity in MT still sum within each group; every other
+# column still takes 'first'.
+GROUP_KEY_COLS = ['Shipment_ID', 'Master Contract Number', 'Delivery', 'SD Document', 'Contract Number', 'Material']
 
 
 def _assign_shipment_id(df):
     """Backfills Shipment_ID across SM, Delivery, SD Document, Contract
-    Number (in that priority order) — kept as a plain identifying/display
-    column on the output (e.g. for the Audit page), but no longer the
-    roll-up key itself; see GROUP_KEY_COLS above."""
+    Number (in that priority order) — the roll-up/upsert key now
+    includes this column directly (see GROUP_KEY_COLS above), on top of
+    remaining a plain identifying/display column on the output (e.g. for
+    the Audit page). Must run before _normalize_group_key_cols() /
+    grouping, since GROUP_KEY_COLS references 'Shipment_ID' and it only
+    exists on the DataFrame after this function has run."""
     df = df.copy()
     for col in _SHIPMENT_ID_COLS:
         if col in df.columns:
@@ -433,7 +452,7 @@ def _normalize_group_key_cols(df):
 
 
 def create_shipment_report(df_zsdr):
-    logger.info("Workflow 2: rolling up by Delivery / SM / Material...")
+    logger.info("Workflow 2: rolling up by " + ", ".join(GROUP_KEY_COLS) + "...")
     df_report = _assign_shipment_id(df_zsdr)
     df_report = _normalize_group_key_cols(df_report)
 
@@ -574,21 +593,23 @@ def read_tab_as_df(sheet, tab_name):
 # tab (monthly Sheet) from SKU-level data across EVERY month, deduped at
 # the LINE-ITEM level.
 #
-# UPSERT KEY: (Delivery, SM, Material) — not (Month, Shipment_ID). The
-# same delivery/SM/material line item showing up in two different
-# months' ZSDR002 uploads (e.g. re-uploaded into the wrong month) used
-# to produce two rows, each with the full quantity — double counting
-# anywhere those rows got summed. Fixed by deduping at the SKU level,
-# before any roll-up:
+# UPSERT KEY: GROUP_KEY_COLS — see that constant's own comment above for
+# why it's (Shipment_ID, Master Contract Number, Delivery, SD Document,
+# Contract Number, Material) rather than just (Delivery, SM, Material).
+# The same line item showing up in two different months' ZSDR002
+# uploads (e.g. re-uploaded into the wrong month) used to produce two
+# rows, each with the full quantity — double counting anywhere those
+# rows got summed. Fixed by deduping at the SKU level, before any
+# roll-up:
 #   1. Read every month's SKU-level '<Mon>_ZSDR002' tab.
-#   2. Normalize Delivery/SM/Material (blank variants all treated as
-#      genuinely blank) — Shipment_ID is still computed too, kept as a
-#      display/identifying column, but is no longer the key.
-#   3. Upsert by (Delivery, SM, Material): a row from a month refreshed
-#      THIS run always wins over one that wasn't; on a further tie, the
-#      later calendar month wins.
-#   4. THEN group the deduped SKU-level rows by (Delivery, SM, Material)
-#      and sum Quantity / Quantity in MT — a shipment with more than one
+#   2. Normalize every GROUP_KEY_COLS column (blank variants all treated
+#      as genuinely blank) — Shipment_ID is computed first via
+#      _assign_shipment_id(), then included directly in the key itself.
+#   3. Upsert by GROUP_KEY_COLS: a row from a month refreshed THIS run
+#      always wins over one that wasn't; on a further tie, the later
+#      calendar month wins.
+#   4. THEN group the deduped SKU-level rows by GROUP_KEY_COLS and sum
+#      Quantity / Quantity in MT — a shipment with more than one
 #      material still gets one row per material, instead of collapsing
 #      to a single row that only shows whichever material happened to
 #      sort first.
@@ -630,7 +651,7 @@ def consolidate_shipment_reports(sheet, months_to_process):
         return None
 
     df_all_sku = pd.concat(frames, ignore_index=True, sort=False)
-    df_all_sku = _assign_shipment_id(df_all_sku)  # Shipment_ID kept as a display column, not the key
+    df_all_sku = _assign_shipment_id(df_all_sku)  # must run first — GROUP_KEY_COLS now includes 'Shipment_ID' itself
 
     for col in GROUP_KEY_COLS:
         if col not in df_all_sku.columns:
@@ -672,7 +693,11 @@ def consolidate_shipment_reports(sheet, months_to_process):
 
     df_consolidated = df_deduped.groupby(group_cols, dropna=False).agg(agg_dict).reset_index()
 
-    lead_cols = [c for c in (GROUP_KEY_COLS + ['Shipment_ID', 'Month']) if c in df_consolidated.columns]
+    # dict.fromkeys(...) de-dupes while preserving order — 'Shipment_ID' is
+    # now already part of GROUP_KEY_COLS itself, so without this a plain
+    # list-concat would list it twice and df_consolidated[lead_cols + ...]
+    # would produce two identically-named 'Shipment_ID' columns.
+    lead_cols = list(dict.fromkeys(c for c in (GROUP_KEY_COLS + ['Shipment_ID', 'Month']) if c in df_consolidated.columns))
     other_cols = [c for c in df_consolidated.columns if c not in lead_cols]
     df_consolidated = df_consolidated[lead_cols + other_cols]
     sort_cols = [c for c in GROUP_KEY_COLS if c in df_consolidated.columns]
@@ -794,7 +819,7 @@ def mirror_to_cur_month(gc, production_sheet_id, df_shipment_month, month_abbr=N
 # with THIS month (so a re-upload of an already-uploaded month fully
 # replaces that month's slice — no stale row left behind if the new
 # upload's shape differs from the old one), appends this month's freshly
-# computed rows, and re-applies the (Delivery, SM, Material) dedup
+# computed rows, and re-applies the GROUP_KEY_COLS dedup
 # safety net against every OTHER month's existing rows too — an
 # accidental duplicate under a different month still resolves in favor
 # of the freshest upload, exactly like the old cross-month consolidation
